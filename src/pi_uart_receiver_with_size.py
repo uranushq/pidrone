@@ -18,10 +18,10 @@ BAUD_RATE = 115200
 # JSON_DIR = "/home/pi/PCA9635/jsonFile/"
 
 # 컨테이너 내부 기준 경로
-SAVE_DIR = "/data/bin_files"
-LOG_FILE = "/data/transfer_log.txt"
-WORK_DIR = "/app"  # rpi_play, rgb_test 등의 실행 파일 위치
-JSON_DIR = "/data/jsonFile"
+SAVE_DIR = "./bin_files"
+LOG_FILE = "./transfer_log.txt"
+WORK_DIR = "./"  # rpi_play, rgb_test 등의 실행 파일 위치
+JSON_DIR = "./jsonFile"
 
 # Ensure save directory exists
 os.makedirs(SAVE_DIR, exist_ok=True)

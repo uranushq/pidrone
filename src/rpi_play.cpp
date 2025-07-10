@@ -211,7 +211,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string scheduleName = argv[1];
-    const std::string binFilePath = "/app/bin_files/";
+    const std::string binFilePath = "./src/bin_files/";
     int dronePixel = std::stoi(argv[2]); // Convert string to integer
     int frameSize = dronePixel * dronePixel * 3;
 

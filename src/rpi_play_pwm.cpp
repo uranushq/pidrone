@@ -38,7 +38,7 @@ std::vector<std::string> fileLists;
 std::string currentFilename;
 std::vector<std::vector<uint8_t>> currentFrames;
 
-const std::string SAVE_DIR = "/app/bin_files/";
+const std::string SAVE_DIR = "./src/bin_files/";
 
 // Define LED control structures
 struct Channel {
