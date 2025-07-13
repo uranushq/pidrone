@@ -18,8 +18,8 @@ PCA9635 pca2(0x41);
 PCA9635 pca3(0x42);
 
 std::map<std::string, std::vector<std::vector<uint8_t>>> binDataMap;
-std::chrono::steady_clock::time_point lastCommandTime = std::chrono::steady_clock::now();
-const int COMMAND_COOLDOWN_MS = 1000; 
+std::chrono::steady_clock::time_point lastTimeA, lastTimeB, lastTimeC;
+const int COMMAND_COOLDOWN_MS = 5000; 
 
 bool running = true;
 bool isPlaying = false;
@@ -75,25 +75,34 @@ RGBChannel getLEDChannel(int ledIndex) {
 }
 
 void setLED(int ledIndex, uint8_t r, uint8_t g, uint8_t b) {
-    constexpr int Rmax = 180; 
-    constexpr int Gmax = 250; 
-    constexpr int Bmax = 140;
-
-    auto scale = [](uint8_t in, int max) -> uint8_t {
-        int result = static_cast<int>((static_cast<double>(in) / 255.0) * max);
-        return static_cast<uint8_t>(std::clamp(result, 0, 255));
-    };
-
-	RGBChannel ch = getLEDChannel(ledIndex);
-    
-    uint8_t r_fixed = scale(r, Rmax);
-    uint8_t g_fixed = scale(g, Gmax);
-    uint8_t b_fixed = scale(b, Bmax);
-    
+    RGBChannel ch = getLEDChannel(ledIndex);
+    int r_fixed = r * 2/3 ;
+    int b_fixed = b * 2/3 ;
     if (ch.r.pca && ch.r.ch >= 0) ch.r.pca->analogWrite(ch.r.ch, r_fixed);
-    if (ch.g.pca && ch.g.ch >= 0) ch.g.pca->analogWrite(ch.g.ch, g_fixed);
+    if (ch.g.pca && ch.g.ch >= 0) ch.g.pca->analogWrite(ch.g.ch, g);
     if (ch.b.pca && ch.b.ch >= 0) ch.b.pca->analogWrite(ch.b.ch, b_fixed);
 }
+
+// void setLED(int ledIndex, uint8_t r, uint8_t g, uint8_t b) {
+//     constexpr int Rmax = 180; 
+//     constexpr int Gmax = 250; 
+//     constexpr int Bmax = 140;
+
+//     auto scale = [](uint8_t in, int max) -> uint8_t {
+//         int result = static_cast<int>((static_cast<double>(in) / 255.0) * max);
+//         return static_cast<uint8_t>(std::clamp(result, 0, 255));
+//     };
+
+// 	RGBChannel ch = getLEDChannel(ledIndex);
+    
+//     uint8_t r_fixed = scale(r, Rmax);
+//     uint8_t g_fixed = scale(g, Gmax);
+//     uint8_t b_fixed = scale(b, Bmax);
+    
+//     if (ch.r.pca && ch.r.ch >= 0) ch.r.pca->analogWrite(ch.r.ch, r_fixed);
+//     if (ch.g.pca && ch.g.ch >= 0) ch.g.pca->analogWrite(ch.g.ch, g_fixed);
+//     if (ch.b.pca && ch.b.ch >= 0) ch.b.pca->analogWrite(ch.b.ch, b_fixed);
+// }
 
 void handleSignal(int s) {
     running = false;
@@ -118,34 +127,81 @@ void loadCurrentFile() {
     currentFrames = binDataMap[currentFilename];
 }
 
+
 void pwmCallback(int gpio, int level, uint32_t tick) {
-    if (level == 1) {
+  if (level == 1) {
         lastTick = tick;
     } else if (level == 0) {
         uint32_t pw = tick - lastTick;
-        
         auto now = std::chrono::steady_clock::now();
-        auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommandTime).count();
-        if (diff < COMMAND_COOLDOWN_MS) return;
-        lastCommandTime = now;
 
+        // PW_A: NEXT
         if (PW_A - TOL <= pw && pw <= PW_A + TOL) {
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTimeA).count();
+            if (diff < COMMAND_COOLDOWN_MS) return;
+            lastTimeA = now;
+
             fileIndex = (fileIndex + 1) % fileLists.size();
             frameIndex = 0;
             isPlaying = false;
             loadCurrentFile();
             std::cout << "[NEXT] fileIndex=" << fileIndex << std::endl;
-        } else if (PW_B - TOL <= pw && pw <= PW_B + TOL) {
+        }
+
+        // PW_B: PLAY
+        else if (PW_B - TOL <= pw && pw <= PW_B + TOL) {
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTimeB).count();
+            if (diff < COMMAND_COOLDOWN_MS) return;
+            lastTimeB = now;
+
             isPlaying = true;
             std::cout << "[PLAY]" << std::endl;
-        } else if (PW_C - TOL <= pw && pw <= PW_C + TOL) {
+        }
+
+        // PW_C: PAUSE
+        else if (PW_C - TOL <= pw && pw <= PW_C + TOL) {
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTimeC).count();
+            if (diff < COMMAND_COOLDOWN_MS) return;
+            lastTimeC = now;
+
             isPlaying = false;
             std::cout << "[PAUSE]" << std::endl;
         }
     }
 }
 
+void cleanupAndExit(int exitCode) {
+    std::cerr << "[EXIT] Cleaning up..." << std::endl;
+
+    // Turn off all LEDs
+    for (int i = 0; i < 16; ++i) setLED(i, 0, 0, 0);
+
+    // Stop pigpio
+    gpioTerminate();
+
+    std::cerr << "[EXIT] Done. Exiting with code " << exitCode << std::endl;
+    exit(exitCode);
+}
+
+// SIGINT, SIGTERM 처리
+void signalHandler(int signal) {
+    std::cerr << "[SIGNAL] Caught signal: " << signal << std::endl;
+    running = false;
+    cleanupAndExit(0);
+}
+
+// std::terminate 핸들러
+void terminateHandler() {
+    std::cerr << "[EXCEPTION] Uncaught exception occurred." << std::endl;
+    cleanupAndExit(1);
+}
+
+
 int main(int argc, char* argv[]) {
+    std::set_terminate(terminateHandler);
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
+
     if (argc < 3) {
         std::cerr << "Usage: ./rpi_play_pwm <playlist.json> <pixel_size> \n";
         return 1;
@@ -177,6 +233,7 @@ int main(int argc, char* argv[]) {
     for (auto& item : j) fileLists.push_back(item["filename"]);
     
     loadCurrentFile();
+    std::cout << "currentFrames.size(): " << currentFrames.size() << std::endl;
     
     const int interval_us = 30'000;
     struct timespec nextFrameTime;
