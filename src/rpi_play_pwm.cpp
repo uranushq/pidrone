@@ -8,6 +8,7 @@
 #include <chrono>
 #include <csignal>
 #include <iomanip>
+#include <time.h>
 #include <sstream>
 #include <nlohmann/json.hpp>
 #include "./lib/PCA9635_RPI.h"
@@ -177,15 +178,27 @@ int main(int argc, char* argv[]) {
     
     loadCurrentFile();
     
+    const int interval_us = 30'000;
+    struct timespec nextFrameTime;
+    clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
+    
     while (running) {
         if (isPlaying && !currentFrames.empty()) {
             for (; frameIndex < currentFrames.size(); ++frameIndex) {
                 if (!isPlaying) break;
+                
                 auto& frame = currentFrames[frameIndex];
                 for (int i = 0; i < dronePixel * dronePixel; ++i) {
                     setLED(i, frame[i*3+0], frame[i*3+1], frame[i*3+2]);
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+                nextFrameTime.tv_nsec += interval_us * 1000;
+                if (nextFrameTime.tv_nsec >= 1000000000) {
+                    nextFrameTime.tv_sec += 1;
+                    nextFrameTime.tv_nsec -= 1000000000;
+                }
+
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrameTime, nullptr);
             }
 
             if (frameIndex >= currentFrames.size()) {
