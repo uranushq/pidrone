@@ -4,6 +4,8 @@
 #include <chrono>
 #include <thread>
 #include <cstdlib>
+#include <unistd.h>
+#include <sys/wait.h>
 
 const int PWM_GPIO = 18;
 const uint32_t PW_PLAY = 1000;
@@ -15,8 +17,14 @@ std::chrono::steady_clock::time_point lastCommandTime;
 
 std::string jsonFilePath;
 int playIndex;
+pid_t childPid = -1;
 
 void cleanup(int code) {
+    if (childPid > 0) {
+        std::cerr << "[CLEANUP] Killing child process (rpi_play), pid=" << childPid << "\n";
+        kill(childPid, SIGTERM);
+        waitpid(childPid, nullptr, 0);  // 자식 프로세스 종료 대기
+    }
     gpioTerminate();
     std::cerr << "[EXIT] GPIO cleaned up.\n";
     exit(code);
@@ -41,17 +49,34 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
 
         if (PW_PLAY - TOL <= pw && pw <= PW_PLAY + TOL) {
             lastCommandTime = now;
+
+            if (childPid > 0) {
+                std::cerr << "[INFO] Killing existing rpi_play (pid=" << childPid << ")\n";
+                kill(childPid, SIGTERM);
+                waitpid(childPid, nullptr, 0);
+            }
+
             std::cout << "[TRIGGER] Executing rpi_play...\n";
 
-            std::string cmd = "sudo chrt -f 99 ./build/rpi_play " + jsonFilePath + " " + std::to_string(playIndex);
-            int result = system(cmd.c_str());
-            if (result != 0) std::cerr << "[ERROR] rpi_play execution failed.\n";
+            childPid = fork();
+            if (childPid == 0) {
+                // 자식 프로세스: rpi_play 실행
+                execlp("sudo", "sudo", "chrt", "-f", "99",
+                       "./build/rpi_play",
+                       jsonFilePath.c_str(),
+                       std::to_string(playIndex).c_str(),
+                       (char*)nullptr);
+                std::cerr << "[ERROR] Failed to exec rpi_play\n";
+                exit(1);
+            } else if (childPid < 0) {
+                std::cerr << "[ERROR] fork failed\n";
+            }
         }
     }
 }
 
 int main(int argc, char* argv[]) {
-    std::set_terminate([](){ cleanup(1); });
+    std::set_terminate([]() { cleanup(1); });
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
