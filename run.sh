@@ -28,9 +28,12 @@ trap cleanup SIGINT SIGTERM SIGQUIT
 echo "[+] UART 수신기 실행 중..."
 python3 ./src/pi_uart_receiver_with_size.py &  # 경로 수정 필요시 조정
 
+# 20초 대기
+sleep 20
+
 # 예제 실행
 echo "[+] rpi_play_pwm 실행 중..."
-sudo chrt -f 99 ./build/rpi_play_pwm ./src/jsonFile/playlist.json 4
+sudo chrt -f 99 ./build/rpi_play ./src/jsonFile/playlist.json 4
 
 # 백그라운드 프로세스 대기
 wait
