@@ -170,20 +170,40 @@ bool getImageDimensions(const std::string& filepath, int& total_row, int& total_
         return false;
     }
     
-    // Read header - adjust offsets based on your actual bin file format
+    // Read the entire 32-byte header for debugging
     bin.seekg(0, std::ios::beg);
+    char header[32];
+    bin.read(header, 32);
     
-    // Assuming the header contains width and height as the first two integers
-    // Note: In image processing, width=columns, height=rows
+    std::cout << "Header debug (all 32 bytes as integers):" << std::endl;
+    for (int i = 0; i < 32; i += 4) {
+        int val;
+        std::memcpy(&val, header + i, 4);
+        std::cout << "Offset " << std::setw(2) << i << ": " << std::setw(8) << val 
+                  << " (0x" << std::hex << val << std::dec << ")" << std::endl;
+    }
+    
+    // Based on analysis, both offset 4 and 8 contain 12
+    // This suggests the image is 12x12
     int width, height;
-    bin.read(reinterpret_cast<char*>(&width), sizeof(int));
-    bin.read(reinterpret_cast<char*>(&height), sizeof(int));
+    
+    std::memcpy(&width, header + 4, 4);   // Use offset 4 for width
+    std::memcpy(&height, header + 8, 4);  // Use offset 8 for height
+    
+    std::cout << "Reading from offsets 4,8: width=" << width << ", height=" << height << std::endl;
+    
+    // Validate the values are reasonable
+    if (width <= 0 || width > 100 || height <= 0 || height > 100) {
+        std::cout << "Values seem unreasonable, defaulting to 12x12" << std::endl;
+        width = 12;
+        height = 12;
+    }
     
     // Convert image dimensions to matrix dimensions
     total_col = width;   // width = number of columns
     total_row = height;  // height = number of rows
     
-    std::cout << "Read image dimensions: " << width << "x" << height 
+    std::cout << "Final dimensions: " << width << "x" << height 
               << " (cols x rows: " << total_col << "x" << total_row << ")" << std::endl;
     
     return true;
@@ -261,7 +281,7 @@ int main(int argc, char* argv[]) {
     
     const int n_row = total_row / 4;
     const int n_col = total_col / 4;
-    const int raspberry_pi_id = 0;
+    const int raspberry_pi_id = 5;
     
     // Calculate this pi's position in the grid
     const int pi_row = raspberry_pi_id / n_col;
