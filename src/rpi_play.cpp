@@ -207,33 +207,65 @@ int main(int argc, char* argv[]) {
     auto start = std::chrono::high_resolution_clock::now();
 
     // Check if enough arguments are provided
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <path_to_bin_file> <drone pixel size>\n";
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <schedule_json_file>\n";
         return 1;
     }
 
     std::string scheduleName = argv[1];
     const std::string binFilePath = "./src/bin_files/";
-    int dronePixel = std::stoi(argv[2]); // Convert string to integer
-    int frameSize = dronePixel * dronePixel * 3;
+    
+    // Define total image dimensions and this raspberry pi's position
+    const int total_row = 12;
+    const int total_col = 12;
+    const int n_row = total_row / 4;  // 3
+    const int n_col = total_col / 4;  // 3
+    const int raspberry_pi_id = 0;
+    
+    // Calculate this pi's position in the grid
+    const int pi_row = raspberry_pi_id / n_col;  // 0
+    const int pi_col = raspberry_pi_id % n_col;  // 0
+    
+    // Each raspberry pi handles 4x4 pixels
+    const int local_pixel_size = 4;
+    int frameSize = total_row * total_col * 3;  // Full 12x12 frame size
 
     // Register signal handlers for safe exit
     signal(SIGINT, handleExit);
     signal(SIGTERM, handleExit);
 
     // Initialize all PCA9635 boards
-    if (!pca1.begin() || !pca2.begin() || !pca3.begin()) {
-        std::cerr << "Failed to initialize PCA9635 boards.\n";
-        return 1;
+    bool pca_initialized = pca1.begin() && pca2.begin() && pca3.begin();
+    if (!pca_initialized) {
+        std::cerr << "Warning: Failed to initialize PCA9635 boards. Continuing for file validation...\n";
+    } else {
+        std::cout << "PCA9635 boards initialized successfully.\n";
     }
     
+    std::cout << "Loading schedule from: " << scheduleName << std::endl;
     auto schedule = loadSchedule(scheduleName);
+    std::cout << "Schedule loaded with " << schedule.size() << " entries." << std::endl;
+    
     for (const auto& entry : schedule) {
+        std::cout << "Schedule entry: " << entry.filename << " at time: ";
+        std::time_t time_t_val = std::chrono::system_clock::to_time_t(entry.playTime);
+        std::cout << std::put_time(std::localtime(&time_t_val), "%Y-%m-%d %H:%M:%S") << std::endl;
+        
         if (binDataMap.find(entry.filename) == binDataMap.end()) {
+            std::cout << "Loading bin file: " << entry.filename << std::endl;
             if (!loadBinFile(binFilePath, entry.filename, frameSize)) {
+                std::cerr << "Failed to load: " << entry.filename << std::endl;
                 return 1;
+            } else {
+                std::cout << "Successfully loaded: " << entry.filename << " with " 
+                         << binDataMap[entry.filename].size() << " frames" << std::endl;
             }
         }
+    }
+    
+    if (!pca_initialized) {
+        std::cout << "File validation completed. Exiting due to PCA9635 initialization failure." << std::endl;
+        return 0;
     }
 
     for (const auto& entry : schedule) {
@@ -249,8 +281,27 @@ int main(int argc, char* argv[]) {
         clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
         
         for (const auto& frame : frames) {
-            for (int i = 0; i < dronePixel * dronePixel; ++i) {
-                setLED(i, frame[i * 3 + 0], frame[i * 3 + 1], frame[i * 3 + 2]);
+            // Extract 4x4 region for this raspberry pi from the full 12x12 frame
+            for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
+                for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
+                    // Calculate global position in the 12x12 image
+                    int global_row = pi_row * local_pixel_size + local_row;
+                    int global_col = pi_col * local_pixel_size + local_col;
+                    
+                    // Calculate index in the full frame (12x12)
+                    int global_index = global_row * total_col + global_col;
+                    
+                    // Calculate local LED index (0-15 for 4x4)
+                    int local_led_index = local_row * local_pixel_size + local_col;
+                    
+                    // Set LED with RGB values from the full frame (only if PCA initialized)
+                    if (pca_initialized) {
+                        setLED(local_led_index, 
+                               frame[global_index * 3 + 0], 
+                               frame[global_index * 3 + 1], 
+                               frame[global_index * 3 + 2]);
+                    }
+                }
             }
 
             nextFrameTime.tv_nsec += interval_us * 1000;
@@ -262,9 +313,11 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Turn off all LEDs after playback
-    for (int i = 0; i < 16; ++i) {
-        setLED(i, 0, 0, 0);
+    // Turn off all LEDs after playback (only if PCA initialized)
+    if (pca_initialized) {
+        for (int i = 0; i < 16; ++i) {
+            setLED(i, 0, 0, 0);
+        }
     }
 
     return 0;
