@@ -162,6 +162,33 @@ std::chrono::system_clock::time_point parseCompactTime(const std::string& compac
     return std::chrono::system_clock::from_time_t(std::mktime(&tm));
 }
 
+// Read image dimensions from bin file header
+bool getImageDimensions(const std::string& filepath, int& total_row, int& total_col) {
+    std::ifstream bin(filepath, std::ios::binary);
+    if (!bin) {
+        std::cerr << "[ERROR] Cannot open file for dimension reading: " << filepath << "\n";
+        return false;
+    }
+    
+    // Read header - adjust offsets based on your actual bin file format
+    bin.seekg(0, std::ios::beg);
+    
+    // Assuming the header contains width and height as the first two integers
+    // Note: In image processing, width=columns, height=rows
+    int width, height;
+    bin.read(reinterpret_cast<char*>(&width), sizeof(int));
+    bin.read(reinterpret_cast<char*>(&height), sizeof(int));
+    
+    // Convert image dimensions to matrix dimensions
+    total_col = width;   // width = number of columns
+    total_row = height;  // height = number of rows
+    
+    std::cout << "Read image dimensions: " << width << "x" << height 
+              << " (cols x rows: " << total_col << "x" << total_row << ")" << std::endl;
+    
+    return true;
+}
+
 bool loadBinFile(const std::string& path, const std::string& filename, int frameSize) {
     std::ifstream bin(path + filename, std::ios::binary);
     if (!bin) {
@@ -215,20 +242,38 @@ int main(int argc, char* argv[]) {
     std::string scheduleName = argv[1];
     const std::string binFilePath = "./src/bin_files/";
     
-    // Define total image dimensions and this raspberry pi's position
-    const int total_row = 12;
-    const int total_col = 12;
-    const int n_row = total_row / 4;  // 3
-    const int n_col = total_col / 4;  // 3
+    std::cout << "Loading schedule from: " << scheduleName << std::endl;
+    auto schedule = loadSchedule(scheduleName);
+    std::cout << "Schedule loaded with " << schedule.size() << " entries." << std::endl;
+    
+    if (schedule.empty()) {
+        std::cerr << "No entries in schedule!" << std::endl;
+        return 1;
+    }
+    
+    // Read image dimensions from the first bin file
+    int total_row, total_col;
+    std::string firstBinFile = binFilePath + schedule[0].filename;
+    if (!getImageDimensions(firstBinFile, total_row, total_col)) {
+        std::cerr << "Failed to read image dimensions from: " << schedule[0].filename << std::endl;
+        return 1;
+    }
+    
+    const int n_row = total_row / 4;
+    const int n_col = total_col / 4;
     const int raspberry_pi_id = 0;
     
     // Calculate this pi's position in the grid
-    const int pi_row = raspberry_pi_id / n_col;  // 0
-    const int pi_col = raspberry_pi_id % n_col;  // 0
+    const int pi_row = raspberry_pi_id / n_col;
+    const int pi_col = raspberry_pi_id % n_col;
     
     // Each raspberry pi handles 4x4 pixels
     const int local_pixel_size = 4;
-    int frameSize = total_row * total_col * 3;  // Full 12x12 frame size
+    int frameSize = total_row * total_col * 3;  // Full frame size
+    
+    std::cout << "Image dimensions: " << total_row << "x" << total_col << std::endl;
+    std::cout << "Grid size: " << n_row << "x" << n_col << " blocks" << std::endl;
+    std::cout << "This Pi position: (" << pi_row << "," << pi_col << ")" << std::endl;
 
     // Register signal handlers for safe exit
     signal(SIGINT, handleExit);
@@ -241,10 +286,6 @@ int main(int argc, char* argv[]) {
     } else {
         std::cout << "PCA9635 boards initialized successfully.\n";
     }
-    
-    std::cout << "Loading schedule from: " << scheduleName << std::endl;
-    auto schedule = loadSchedule(scheduleName);
-    std::cout << "Schedule loaded with " << schedule.size() << " entries." << std::endl;
     
     for (const auto& entry : schedule) {
         std::cout << "Schedule entry: " << entry.filename << " at time: ";
@@ -281,14 +322,16 @@ int main(int argc, char* argv[]) {
         clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
         
         for (const auto& frame : frames) {
-            // Extract 4x4 region for this raspberry pi from the full 12x12 frame
+            // Extract 4x4 region for this raspberry pi from the full image frame
+            // Python code flattens as: [pixel for row in matrix for pixel in row]
+            // This means row-major order: row 0 all pixels, then row 1 all pixels, etc.
             for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
                 for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
-                    // Calculate global position in the 12x12 image
+                    // Calculate global position in the full image
                     int global_row = pi_row * local_pixel_size + local_row;
                     int global_col = pi_col * local_pixel_size + local_col;
                     
-                    // Calculate index in the full frame (12x12)
+                    // Calculate index in the flattened frame (row-major order)
                     int global_index = global_row * total_col + global_col;
                     
                     // Calculate local LED index (0-15 for 4x4)
