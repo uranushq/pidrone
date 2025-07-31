@@ -8,7 +8,7 @@
 #include <sys/wait.h>
 
 const int PWM_GPIO = 18;
-const uint32_t PW_PLAY = 1000;
+const uint32_t PW_PLAY = 900;
 const int TOL = 10;
 const int COOLDOWN_MS = 5000;
 
