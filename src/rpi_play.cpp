@@ -212,36 +212,35 @@ bool getImageDimensions(const std::string& filepath, int& total_row, int& total_
         return false;
     }
     
-    // Read the entire 32-byte header for debugging
+    // Read the 16-byte header (4 uint32 values)
     bin.seekg(0, std::ios::beg);
-    char header[32];
-    bin.read(header, 32);
+    char header[16];
+    bin.read(header, 16);
     
-    std::cout << "Header debug (all 32 bytes as integers):" << std::endl;
-    for (int i = 0; i < 32; i += 4) {
-        int val;
-        std::memcpy(&val, header + i, 4);
-        std::cout << "Offset " << std::setw(2) << i << ": " << std::setw(8) << val 
-                  << " (0x" << std::hex << val << std::dec << ")" << std::endl;
+    if (bin.gcount() != 16) {
+        std::cerr << "[ERROR] Could not read complete header\n";
+        return false;
     }
     
-    // Based on analysis, both offset 4 and 8 contain 12
-    // This suggests the image is 12x12
-    int width, height;
+    uint32_t total_frames, height, width, fps;
+    std::memcpy(&total_frames, header + 0, 4);   // total_frames
+    std::memcpy(&height, header + 4, 4);         // height  
+    std::memcpy(&width, header + 8, 4);          // width
+    std::memcpy(&fps, header + 12, 4);           // fps
     
-    std::memcpy(&width, header + 4, 4);   // Use offset 4 for width
-    std::memcpy(&height, header + 8, 4);  // Use offset 8 for height
-    
-    std::cout << "Reading from offsets 4,8: width=" << width << ", height=" << height << std::endl;
+    std::cout << "Header info:" << std::endl;
+    std::cout << "Total frames: " << total_frames << std::endl;
+    std::cout << "Height: " << height << std::endl;
+    std::cout << "Width: " << width << std::endl;
+    std::cout << "FPS: " << fps << std::endl;
     
     // Validate the values are reasonable
-    if (width <= 0 || width > 100 || height <= 0 || height > 100) {
-        std::cout << "Values seem unreasonable, defaulting to 12x12" << std::endl;
-        width = 12;
-        height = 12;
+    if (width <= 0 || width > 1000 || height <= 0 || height > 1000) {
+        std::cerr << "[ERROR] Invalid dimensions: " << width << "x" << height << std::endl;
+        return false;
     }
     
-    // Convert image dimensions to matrix dimensions
+    // Set output values
     total_col = width;   // width = number of columns
     total_row = height;  // height = number of rows
     
@@ -258,15 +257,34 @@ bool loadBinFile(const std::string& path, const std::string& filename, int frame
         return false;
     }
 
+    // Get file size to calculate actual available frames
+    bin.seekg(0, std::ios::end);
+    std::streampos fileSize = bin.tellg();
+    
+    // Calculate actual frames based on file size
+    // Header is 16 bytes, trailer might be 16 bytes (32 total overhead)
+    std::streampos frameDataSize = fileSize - 32;  // subtract header + trailer
+    uint32_t actualFrames = frameDataSize / frameSize;
+    
+    std::cout << "File size: " << fileSize << " bytes" << std::endl;
+    std::cout << "Frame size: " << frameSize << " bytes" << std::endl;
+    std::cout << "Calculated frames: " << actualFrames << std::endl;
+
     std::vector<std::vector<uint8_t>> frames;
-    bin.seekg(32, std::ios::beg);
-    while (true) {
+    bin.seekg(16, std::ios::beg);  // Skip 16-byte header
+    
+    for (uint32_t i = 0; i < actualFrames; ++i) {
         std::vector<uint8_t> frame(frameSize);
         bin.read(reinterpret_cast<char*>(frame.data()), frameSize);
-        if (bin.gcount() != frameSize) break;
+        if (bin.gcount() != frameSize) {
+            std::cout << "End of frame data reached at frame " << i << std::endl;
+            break;
+        }
         frames.push_back(frame);
     }
+    
     binDataMap[filename] = std::move(frames);
+    std::cout << "Loaded " << binDataMap[filename].size() << " frames from " << filename << std::endl;
     return true;
 }
 
