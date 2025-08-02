@@ -11,6 +11,11 @@
 #include <nlohmann/json.hpp>
 #include "./lib/PCA9635_RPI.h"
 #include <time.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <cstring>
 
 
 // Initialize PCA9635 boards with I2C addresses
@@ -19,6 +24,43 @@ PCA9635 pca2(0x41);
 PCA9635 pca3(0x42);
 
 std::map<std::string, std::vector<std::vector<uint8_t>>> binDataMap;
+
+int getLastOctetFromIP() {
+    struct ifaddrs *ifaddr, *ifa;
+    int family;
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        std::cerr << "[ERROR] getifaddrs failed, using default ID 4\n";
+        return 4;
+    }
+    
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+        
+        family = ifa->ifa_addr->sa_family;
+        
+        // Skip loopback interface
+        if (strcmp(ifa->ifa_name, "lo") == 0) continue;
+        
+        if (family == AF_INET) {
+            struct sockaddr_in* addr_in = (struct sockaddr_in*)ifa->ifa_addr;
+            std::string ip = inet_ntoa(addr_in->sin_addr);
+            
+            // Find the last dot and extract the last octet
+            size_t lastDot = ip.find_last_of('.');
+            if (lastDot != std::string::npos) {
+                int lastOctet = std::stoi(ip.substr(lastDot + 1));
+                std::cout << "[INFO] Found IP: " << ip << ", last octet: " << lastOctet << std::endl;
+                freeifaddrs(ifaddr);
+                return lastOctet - 1;  // Subtract 1 as requested
+            }
+        }
+    }
+    
+    freeifaddrs(ifaddr);
+    std::cerr << "[ERROR] No valid IP found, using default ID 5\n";
+    return 4;  // Default fallback
+}
 
 struct ScheduleEntry {
     std::string filename;
@@ -234,9 +276,20 @@ std::vector<ScheduleEntry> loadSchedule(const std::string& jsonPath) {
     f >> j;
 
     std::vector<ScheduleEntry> schedule;
-    for (auto& item : j) {
-        schedule.push_back({ item["filename"], parseCompactTime(item["time"]) });
+    
+    // Check if it's the new format (object with PWM keys) or old format (array)
+    if (j.is_object() && !j.empty()) {
+        // New format: {"900": {"filename": "...", "time": "..."}, ...}
+        for (auto& [pwmKey, item] : j.items()) {
+            schedule.push_back({ item["filename"], parseCompactTime(item["time"]) });
+        }
+    } else if (j.is_array()) {
+        // Old format: [{"filename": "...", "time": "..."}, ...]
+        for (auto& item : j) {
+            schedule.push_back({ item["filename"], parseCompactTime(item["time"]) });
+        }
     }
+    
     return schedule;
 }
 
@@ -255,33 +308,26 @@ int main(int argc, char* argv[]) {
 
     // Check if enough arguments are provided
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <schedule_json_file>\n";
+        std::cerr << "Usage: " << argv[0] << " <bin_file_path>\n";
         return 1;
     }
 
-    std::string scheduleName = argv[1];
-    const std::string binFilePath = "./src/bin_files/";
+    std::string binFilePath = argv[1];
     
-    std::cout << "Loading schedule from: " << scheduleName << std::endl;
-    auto schedule = loadSchedule(scheduleName);
-    std::cout << "Schedule loaded with " << schedule.size() << " entries." << std::endl;
+    std::cout << "Loading bin file: " << binFilePath << std::endl;
     
-    if (schedule.empty()) {
-        std::cerr << "No entries in schedule!" << std::endl;
-        return 1;
-    }
-    
-    // Read image dimensions from the first bin file
+    // Read image dimensions from the bin file
     int total_row, total_col;
-    std::string firstBinFile = binFilePath + schedule[0].filename;
-    if (!getImageDimensions(firstBinFile, total_row, total_col)) {
-        std::cerr << "Failed to read image dimensions from: " << schedule[0].filename << std::endl;
+    if (!getImageDimensions(binFilePath, total_row, total_col)) {
+        std::cerr << "Failed to read image dimensions from: " << binFilePath << std::endl;
         return 1;
     }
     
     const int n_row = total_row / 4;
     const int n_col = total_col / 4;
-    const int raspberry_pi_id = 5;
+    const int raspberry_pi_id = getLastOctetFromIP();
+
+    std::cout << "[INFO] Raspberry Pi ID: " << raspberry_pi_id << std::endl;
     
     // Calculate this pi's position in the grid
     const int pi_row = raspberry_pi_id / n_col;
@@ -307,21 +353,19 @@ int main(int argc, char* argv[]) {
         std::cout << "PCA9635 boards initialized successfully.\n";
     }
     
-    for (const auto& entry : schedule) {
-        std::cout << "Schedule entry: " << entry.filename << " at time: ";
-        std::time_t time_t_val = std::chrono::system_clock::to_time_t(entry.playTime);
-        std::cout << std::put_time(std::localtime(&time_t_val), "%Y-%m-%d %H:%M:%S") << std::endl;
-        
-        if (binDataMap.find(entry.filename) == binDataMap.end()) {
-            std::cout << "Loading bin file: " << entry.filename << std::endl;
-            if (!loadBinFile(binFilePath, entry.filename, frameSize)) {
-                std::cerr << "Failed to load: " << entry.filename << std::endl;
-                return 1;
-            } else {
-                std::cout << "Successfully loaded: " << entry.filename << " with " 
-                         << binDataMap[entry.filename].size() << " frames" << std::endl;
-            }
-        }
+    // Load the single bin file
+    std::cout << "Loading bin file: " << binFilePath << std::endl;
+    
+    // Extract just the filename from the full path
+    std::string filename = binFilePath.substr(binFilePath.find_last_of("/\\") + 1);
+    std::string path = binFilePath.substr(0, binFilePath.find_last_of("/\\") + 1);
+    
+    if (!loadBinFile(path, filename, frameSize)) {
+        std::cerr << "Failed to load: " << binFilePath << std::endl;
+        return 1;
+    } else {
+        std::cout << "Successfully loaded: " << filename << " with " 
+                 << binDataMap[filename].size() << " frames" << std::endl;
     }
     
     if (!pca_initialized) {
@@ -329,51 +373,45 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    for (const auto& entry : schedule) {
-        auto now = std::chrono::system_clock::now();
-        if (entry.playTime > now) {
-            std::this_thread::sleep_until(entry.playTime);
-        }
-
-        const auto& frames = binDataMap[entry.filename];
-        
-        const int interval_us = 200'000;
-        struct timespec nextFrameTime;
-        clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
-        
-        for (const auto& frame : frames) {
-            // Extract 4x4 region for this raspberry pi from the full image frame
-            // Python code flattens as: [pixel for row in matrix for pixel in row]
-            // This means row-major order: row 0 all pixels, then row 1 all pixels, etc.
-            for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
-                for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
-                    // Calculate global position in the full image
-                    int global_row = pi_row * local_pixel_size + local_row;
-                    int global_col = pi_col * local_pixel_size + local_col;
-                    
-                    // Calculate index in the flattened frame (row-major order)
-                    int global_index = global_row * total_col + global_col;
-                    
-                    // Calculate local LED index (0-15 for 4x4)
-                    int local_led_index = local_row * local_pixel_size + local_col;
-                    
-                    // Set LED with RGB values from the full frame (only if PCA initialized)
-                    if (pca_initialized) {
-                        setLED(local_led_index, 
-                               frame[global_index * 3 + 0], 
-                               frame[global_index * 3 + 1], 
-                               frame[global_index * 3 + 2]);
-                    }
+    // Play the loaded bin file
+    const auto& frames = binDataMap[filename];
+    
+    const int interval_us = 200'000;
+    struct timespec nextFrameTime;
+    clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
+    
+    for (const auto& frame : frames) {
+        // Extract 4x4 region for this raspberry pi from the full image frame
+        // Python code flattens as: [pixel for row in matrix for pixel in row]
+        // This means row-major order: row 0 all pixels, then row 1 all pixels, etc.
+        for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
+            for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
+                // Calculate global position in the full image
+                int global_row = pi_row * local_pixel_size + local_row;
+                int global_col = pi_col * local_pixel_size + local_col;
+                
+                // Calculate index in the flattened frame (row-major order)
+                int global_index = global_row * total_col + global_col;
+                
+                // Calculate local LED index (0-15 for 4x4)
+                int local_led_index = local_row * local_pixel_size + local_col;
+                
+                // Set LED with RGB values from the full frame (only if PCA initialized)
+                if (pca_initialized) {
+                    setLED(local_led_index, 
+                           frame[global_index * 3 + 0], 
+                           frame[global_index * 3 + 1], 
+                           frame[global_index * 3 + 2]);
                 }
             }
-
-            nextFrameTime.tv_nsec += interval_us * 1000;
-            if (nextFrameTime.tv_nsec >= 1000000000) {
-                nextFrameTime.tv_sec += 1;
-                nextFrameTime.tv_nsec -= 1000000000;
-            }
-            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrameTime, nullptr);
         }
+
+        nextFrameTime.tv_nsec += interval_us * 1000;
+        if (nextFrameTime.tv_nsec >= 1000000000) {
+            nextFrameTime.tv_sec += 1;
+            nextFrameTime.tv_nsec -= 1000000000;
+        }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrameTime, nullptr);
     }
     
     // Turn off all LEDs after playback (only if PCA initialized)
