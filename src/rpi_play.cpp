@@ -325,7 +325,8 @@ int main(int argc, char* argv[]) {
     
     const int n_row = total_row / 4;
     const int n_col = total_col / 4;
-    const int raspberry_pi_id = getLastOctetFromIP();
+    // const int raspberry_pi_id = getLastOctetFromIP();
+    const int raspberry_pi_id = 3;
 
     std::cout << "[INFO] Raspberry Pi ID: " << raspberry_pi_id << std::endl;
     
@@ -387,7 +388,8 @@ int main(int argc, char* argv[]) {
         for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
             for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
                 // Calculate global position in the full image
-                int global_row = pi_row * local_pixel_size + local_row;
+                // Flip the row order to fix upside-down issue
+                int global_row = (n_row - 1 - pi_row) * local_pixel_size + local_row;
                 int global_col = pi_col * local_pixel_size + local_col;
                 
                 // Calculate index in the flattened frame (row-major order)
