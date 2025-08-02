@@ -52,7 +52,7 @@ int getLastOctetFromIP() {
                 int lastOctet = std::stoi(ip.substr(lastDot + 1));
                 std::cout << "[INFO] Found IP: " << ip << ", last octet: " << lastOctet << std::endl;
                 freeifaddrs(ifaddr);
-                return lastOctet - 1;  // Subtract 1 as requested
+                return lastOctet;
             }
         }
     }
