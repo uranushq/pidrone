@@ -1,3 +1,4 @@
-{"900": {"filename":"watermelon_sequence.bin","time":"20250626222046"},
- "1000": {"filename":"white_24000_frames.bin","time":"20250626222046"}
+{"500": {"filename":"blinking_R0_G0_B255_12x12_repeat500.bin","time":"20250626222046"},
+ "1000": {"filename":"blinking_R0_G255_B0_12x12_repeat500.bin","time":"20250626222046"},
+ "1500": {"filename":"blinking_R255_G0_B0_12x12_repeat500.bin","time":"20250626222046"}
 }
