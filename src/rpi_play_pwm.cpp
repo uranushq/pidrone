@@ -92,6 +92,18 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
             return;
         }
 
+        // Check for stop signal (3000us PWM)
+        if (std::abs(static_cast<int32_t>(pw - 3000)) <= 25) {
+            std::cout << "[STOP] PWM 3000us received - stopping rpi_play\n";
+            if (childPid > 0) {
+                std::cout << "[STOP] Killing rpi_play (pid=" << childPid << ")\n";
+                kill(childPid, SIGTERM);
+                waitpid(childPid, nullptr, 0);
+                childPid = -1;
+            }
+            return;
+        }
+
         // Round PWM value to nearest 50 (0-2000 range, 50 step intervals)
         uint32_t roundedPW = ((pw + 25) / 50) * 50;
         if (roundedPW > 2000) roundedPW = 2000;
