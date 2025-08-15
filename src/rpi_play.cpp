@@ -343,7 +343,8 @@ int main(int argc, char* argv[]) {
     
     const int n_row = total_row / 4;
     const int n_col = total_col / 4;
-    const int raspberry_pi_id = getLastOctetFromIP();
+    // const int raspberry_pi_id = getLastOctetFromIP();
+    const int raspberry_pi_id = 3;
 
     std::cout << "[INFO] Raspberry Pi ID: " << raspberry_pi_id << std::endl;
     
