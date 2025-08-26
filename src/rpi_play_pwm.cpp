@@ -127,6 +127,11 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
     } else if (level == 0) {
         uint32_t pw = tick - lastTick;
         
+        // Ignore PWM values 50us or below (noise filtering)
+        if (pw <= 50) {
+            return;
+        }
+        
         // Log all incoming PWM values
         std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
         
