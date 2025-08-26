@@ -396,10 +396,20 @@ int main(int argc, char* argv[]) {
     const auto& frames = binDataMap[filename];
     
     const int interval_us = 200'000;
-    struct timespec nextFrameTime;
+    struct timespec nextFrameTime, actualTime;
     clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
     
+    int frameIndex = 0;
     for (const auto& frame : frames) {
+        // Log frame start time and LED sending start
+        clock_gettime(CLOCK_MONOTONIC, &actualTime);
+        std::cout << "[FRAME_START] Frame " << frameIndex << " start at " 
+                  << actualTime.tv_sec << "." << std::setfill('0') << std::setw(9) << actualTime.tv_nsec 
+                  << std::endl;
+        
+        // Measure LED sending time
+        auto ledSendStart = std::chrono::high_resolution_clock::now();
+        
         // Extract 4x4 region for this raspberry pi from the full image frame
         // Python code flattens as: [pixel for row in matrix for pixel in row]
         // This means row-major order: row 0 all pixels, then row 1 all pixels, etc.
@@ -425,13 +435,49 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        
+        // Measure and log LED sending completion time
+        auto ledSendEnd = std::chrono::high_resolution_clock::now();
+        auto ledDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(ledSendEnd - ledSendStart).count();
+        
+        struct timespec ledSendTime;
+        clock_gettime(CLOCK_MONOTONIC, &ledSendTime);
+        std::cout << "[LED_SENT] Frame " << frameIndex << " LEDs sent at " 
+                  << ledSendTime.tv_sec << "." << std::setfill('0') << std::setw(9) << ledSendTime.tv_nsec 
+                  << ", LED_duration: " << ledDuration << "ns" << std::endl;
 
         nextFrameTime.tv_nsec += interval_us * 1000;
         if (nextFrameTime.tv_nsec >= 1000000000) {
             nextFrameTime.tv_sec += 1;
             nextFrameTime.tv_nsec -= 1000000000;
         }
+        
+        // Log expected vs actual sleep timing
+        struct timespec beforeSleep, afterSleep;
+        clock_gettime(CLOCK_MONOTONIC, &beforeSleep);
+        
+        std::cout << "[SLEEP_START] Frame " << frameIndex << " sleep start at " 
+                  << beforeSleep.tv_sec << "." << std::setfill('0') << std::setw(9) << beforeSleep.tv_nsec 
+                  << ", target: " << nextFrameTime.tv_sec << "." << std::setfill('0') << std::setw(9) << nextFrameTime.tv_nsec 
+                  << std::endl;
+        
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrameTime, nullptr);
+        
+        clock_gettime(CLOCK_MONOTONIC, &afterSleep);
+        
+        // Calculate timing accuracy
+        long long expectedNs = nextFrameTime.tv_sec * 1000000000LL + nextFrameTime.tv_nsec;
+        long long actualNs = afterSleep.tv_sec * 1000000000LL + afterSleep.tv_nsec;
+        long long beforeNs = beforeSleep.tv_sec * 1000000000LL + beforeSleep.tv_nsec;
+        long long diffNs = actualNs - expectedNs;
+        long long sleepTimeNs = actualNs - beforeNs;
+        long long targetSleepNs = expectedNs - beforeNs;
+        
+        std::cout << "[SLEEP_END] Frame " << frameIndex << " wakeup at " 
+                  << afterSleep.tv_sec << "." << std::setfill('0') << std::setw(9) << afterSleep.tv_nsec 
+                  << ", accuracy: " << diffNs << "ns, slept: " << sleepTimeNs 
+                  << "ns, target: " << targetSleepNs << "ns" << std::endl;
+        frameIndex++;
     }
     
     // Turn off all LEDs after playback (only if PCA initialized)
