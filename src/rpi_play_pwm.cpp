@@ -130,6 +130,12 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         // Log all incoming PWM values
         std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
         
+        // Check if rpi_play is currently running - ignore new signals
+        if (childPid > 0) {
+            std::cout << "[BUSY] rpi_play is currently running (pid=" << childPid << "), ignoring PWM " << pw << "us" << std::endl;
+            return;
+        }
+        
         auto now = std::chrono::steady_clock::now();
         int diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommandTime).count();
         if (diff < COOLDOWN_MS) {
@@ -183,12 +189,7 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         
         lastCommandTime = now;
 
-        if (childPid > 0) {
-            std::cerr << "[INFO] Killing existing rpi_play (pid=" << childPid << ")" << std::endl;
-            kill(childPid, SIGTERM);
-            waitpid(childPid, nullptr, 0);
-        }
-
+        // rpi_play가 실행 중이 아닐 때만 새로운 프로세스 시작
         std::cout << "[TRIGGER] Executing rpi_play with " << binFilePath << "..." << std::endl;
 
         childPid = fork();
@@ -239,6 +240,22 @@ int main(int argc, char* argv[]) {
     while (true) {
         struct timespec sleepTime = {1, 0}; // 1초씩 sleep
         nanosleep(&sleepTime, nullptr);
+        
+        // Check if child process is still running
+        if (childPid > 0) {
+            int status;
+            pid_t result = waitpid(childPid, &status, WNOHANG);
+            if (result == childPid) {
+                // Child process has terminated
+                std::cout << "[FINISHED] rpi_play process (pid=" << childPid << ") has finished" << std::endl;
+                childPid = -1;  // Reset to allow new signals
+            } else if (result == -1) {
+                // Error occurred
+                std::cerr << "[ERROR] waitpid failed for pid=" << childPid << std::endl;
+                childPid = -1;  // Reset to allow new signals
+            }
+            // If result == 0, child is still running
+        }
         
         // 주기적으로 expired 정리 (이제 덜 중요함)
         cleanupExpiredConfirmations();
