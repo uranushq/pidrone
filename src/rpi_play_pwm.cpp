@@ -109,56 +109,11 @@ bool checkPWMConfirmation(uint32_t rawPWM, uint32_t targetPWM) {
     
     auto it = pendingConfirmations.find(targetPWM);
     
-    if (it == pendingConfirmations.end()) {
-        // First detection - start waiting for confirmation
-        pendingConfirmations[targetPWM] = {targetPWM, now, 1};
-        std::cout << "[FIRST] Raw PWM " << rawPWM << "us -> Target " << targetPWM 
-                  << "us detected, waiting exactly 500ms for confirmation..." << std::endl;
-        
-        // Wait exactly 500ms using nanosleep
-        struct timespec waitTime = {0, 500000000}; // 0.5초
-        struct timespec startTime, endTime;
-        clock_gettime(CLOCK_MONOTONIC, &startTime);
-        
-        nanosleep(&waitTime, nullptr);
-        
-        clock_gettime(CLOCK_MONOTONIC, &endTime);
-        long long actualWaitNs = (endTime.tv_sec - startTime.tv_sec) * 1000000000LL + 
-                                (endTime.tv_nsec - startTime.tv_nsec);
-        
-        std::cout << "[WAIT_COMPLETE] Target PWM " << targetPWM 
-                  << "us waited " << actualWaitNs << "ns (target: 500000000ns)" << std::endl;
-        
-        // Check if confirmation was received during wait
-        auto confirmIt = pendingConfirmations.find(targetPWM);
-        if (confirmIt != pendingConfirmations.end() && confirmIt->second.confirmationCount >= 2) {
-            std::cout << "[CONFIRMED_AFTER_WAIT] Target PWM " << targetPWM 
-                      << "us confirmed with count: " << confirmIt->second.confirmationCount << std::endl;
-            pendingConfirmations.erase(confirmIt);
-            return true;
-        } else {
-            std::cout << "[TIMEOUT_NO_CONFIRMATION] Target PWM " << targetPWM 
-                      << "us no confirmation received" << std::endl;
-            pendingConfirmations.erase(targetPWM);
-            return false;
-        }
-    } else {
-        // Subsequent detection within timeout
-        auto timeDiff = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.firstDetectionTime).count();
-        
-        if (timeDiff <= CONFIRMATION_TIMEOUT_MS) {
-            it->second.confirmationCount++;
-            std::cout << "[CONFIRMATION] Raw PWM " << rawPWM << "us -> Target " << targetPWM 
-                      << "us count now: " << it->second.confirmationCount 
-                      << ", time: " << timeDiff << "ms" << std::endl;
-            return false; // Don't execute yet, let the wait complete
-        } else {
-            // Reset as new detection
-            std::cout << "[RESET] Target PWM " << targetPWM << "us timeout, starting new wait" << std::endl;
-            pendingConfirmations[targetPWM] = {targetPWM, now, 1};
-            return false;
-        }
-    }
+    // 2번 신호 확인 로직 주석 처리: 신호가 1번만 들어와도 바로 실행
+    // if (it == pendingConfirmations.end()) {
+    //     ... (중복 확인 및 대기 로직) ...
+    // }
+    return true;
 }
 
 void signalHandler(int sig) {
