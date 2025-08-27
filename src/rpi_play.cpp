@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <cstring>
+#include <sched.h>
 
 
 // Initialize PCA9635 boards with I2C addresses
@@ -322,6 +323,15 @@ void handleExit(int signum) {
 }
 
 int main(int argc, char* argv[]) {
+    // Set high priority for LED control process
+    struct sched_param param;
+    param.sched_priority = 98;  // High priority for LED timing precision
+    if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
+        std::cerr << "[WARNING] Failed to set high priority scheduling for LED control\n";
+    } else {
+        std::cout << "[SCHED] LED control process set to SCHED_FIFO priority 98\n";
+    }
+    
     auto start = std::chrono::high_resolution_clock::now();
 
     // Check if enough arguments are provided
