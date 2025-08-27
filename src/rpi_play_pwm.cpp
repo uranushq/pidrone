@@ -11,36 +11,259 @@
 #include <map>
 #include <cmath>
 #include <time.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <atomic>
+#include <spawn.h>
+#include <sched.h>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 const int PWM_GPIO = 18;
 const int TOL = 10;
-const int COOLDOWN_MS = 5000;
-const int CONFIRMATION_TIMEOUT_MS = 500;  // 0.5초 내에 같은 신호가 다시 와야 함
+const int PWM_GPIO = 18;
+static const char* SOCK_PATH = "/tmp/rpi_playerd.sock";
 
 uint32_t lastTick = 0;
 std::chrono::steady_clock::time_point lastCommandTime;
 
-pid_t childPid = -1;
 std::map<uint32_t, std::string> pwmPlaylist;
+std::atomic<bool> daemonRunning{true};
 
-// PWM confirmation tracking
-struct PWMConfirmation {
-    uint32_t targetPWM;  // 플레이리스트에서 찾은 목표 PWM 값
-    std::chrono::steady_clock::time_point firstDetectionTime;
-    int confirmationCount;
+// Command queue for async processing
+struct PlayCommand {
+    std::string binFilePath;
+    std::chrono::steady_clock::time_point timestamp;
 };
 
-std::map<uint32_t, PWMConfirmation> pendingConfirmations;
+std::queue<PlayCommand> commandQueue;
+std::mutex queueMutex;
+std::condition_variable queueCv;
+
+extern char **environ;
 
 void cleanup(int code) {
-    if (childPid > 0) {
-        std::cerr << "[CLEANUP] Killing child process (rpi_play), pid=" << childPid << "\n";
-        kill(childPid, SIGTERM);
-        waitpid(childPid, nullptr, 0);  // 자식 프로세스 종료 대기
+    daemonRunning = false;
+    
+    // Close daemon socket
+    if (daemonSocketFd >= 0) {
+        close(daemonSocketFd);
+        unlink(SOCK_PATH);
     }
+    
     gpioTerminate();
-    std::cerr << "[EXIT] GPIO cleaned up.\n";
+    std::cerr << "[EXIT] GPIO and daemon cleaned up.\n";
     exit(code);
+}
+
+// Send command to daemon via Unix socket
+bool sendCommandToDaemon(const nlohmann::json& cmd) {
+    int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        std::cerr << "[ERROR] Failed to create socket\n";
+        return false;
+    }
+    
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, SOCK_PATH);
+    
+    if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "[ERROR] Failed to connect to daemon\n";
+        close(sockfd);
+        return false;
+    }
+    
+    std::string cmdStr = cmd.dump();
+    if (write(sockfd, cmdStr.c_str(), cmdStr.size()) < 0) {
+        std::cerr << "[ERROR] Failed to send command\n";
+        close(sockfd);
+        return false;
+    }
+    
+    // Read response (optional)
+    char response[256] = {0};
+    read(sockfd, response, sizeof(response) - 1);
+    std::cout << "[DAEMON_RESPONSE] " << response << std::endl;
+    
+    close(sockfd);
+    return true;
+}
+
+// Spawn rpi_play with optimized parameters
+int spawnRpiPlay(const std::string& binFilePath) {
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    
+    // Set real-time priority
+    sched_param sp = {.sched_priority = 98};
+    posix_spawnattr_setschedpolicy(&attr, SCHED_FIFO);
+    posix_spawnattr_setschedparam(&attr, &sp);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSCHEDULER);
+    
+    const char* argv[] = {"./build/rpi_play", binFilePath.c_str(), nullptr};
+    pid_t pid;
+    int rc = posix_spawn(&pid, "./build/rpi_play", nullptr, &attr, (char* const*)argv, environ);
+    posix_spawnattr_destroy(&attr);
+    
+    if (rc == 0) {
+        std::cout << "[SPAWN] rpi_play started with pid=" << pid << std::endl;
+        return pid;
+    } else {
+        std::cerr << "[ERROR] posix_spawn failed: " << strerror(rc) << std::endl;
+        return -1;
+    }
+}
+
+// File cache warming
+void warmFileCache(const std::string& filePath) {
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file) return;
+    
+    std::vector<char> buffer(1024 * 1024); // 1MB buffer
+    while (file.read(buffer.data(), buffer.size())) {
+        // Just read to warm the cache
+    }
+    std::cout << "[CACHE_WARM] Warmed cache for " << filePath << std::endl;
+}
+
+// Daemon worker thread - handles play commands
+void daemonWorker() {
+    pid_t currentChild = -1;
+    std::cout << "[DAEMON_WORKER] Started\n";
+    
+    while (daemonRunning) {
+        std::unique_lock<std::mutex> lock(queueMutex);
+        queueCv.wait(lock, [] { return !commandQueue.empty() || !daemonRunning; });
+        
+        if (!daemonRunning) break;
+        
+        if (!commandQueue.empty()) {
+            PlayCommand cmd = commandQueue.front();
+            commandQueue.pop();
+            lock.unlock();
+            
+            // Kill existing child if running
+            if (currentChild > 0) {
+                std::cout << "[DAEMON] Stopping current playback (pid=" << currentChild << ")\n";
+                kill(currentChild, SIGTERM);
+                waitpid(currentChild, nullptr, 0);
+                currentChild = -1;
+            }
+            
+            // Warm cache for the file
+            warmFileCache(cmd.binFilePath);
+            
+            // Spawn new rpi_play
+            currentChild = spawnRpiPlay(cmd.binFilePath);
+            
+            if (currentChild > 0) {
+                std::cout << "[DAEMON] Playing " << cmd.binFilePath << " (pid=" << currentChild << ")\n";
+                
+                // Wait for completion in non-blocking way
+                std::thread([&currentChild]() {
+                    int status;
+                    waitpid(currentChild, &status, 0);
+                    currentChild = -1;
+                    std::cout << "[DAEMON] Playback finished\n";
+                }).detach();
+            }
+        }
+    }
+    
+    // Cleanup on exit
+    if (currentChild > 0) {
+        kill(currentChild, SIGTERM);
+        waitpid(currentChild, nullptr, 0);
+    }
+    
+    std::cout << "[DAEMON_WORKER] Stopped\n";
+}
+
+// Daemon socket server
+void daemonSocketServer() {
+    unlink(SOCK_PATH);
+    
+    daemonSocketFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (daemonSocketFd < 0) {
+        std::cerr << "[ERROR] Failed to create daemon socket\n";
+        return;
+    }
+    
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, SOCK_PATH);
+    
+    if (bind(daemonSocketFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "[ERROR] Failed to bind daemon socket\n";
+        close(daemonSocketFd);
+        return;
+    }
+    
+    if (listen(daemonSocketFd, 5) < 0) {
+        std::cerr << "[ERROR] Failed to listen on daemon socket\n";
+        close(daemonSocketFd);
+        return;
+    }
+    
+    chmod(SOCK_PATH, 0666); // Allow access
+    std::cout << "[DAEMON_SOCKET] Listening on " << SOCK_PATH << std::endl;
+    
+    while (daemonRunning) {
+        int clientFd = accept(daemonSocketFd, nullptr, nullptr);
+        if (clientFd < 0) {
+            if (daemonRunning) {
+                std::cerr << "[ERROR] Failed to accept connection\n";
+            }
+            continue;
+        }
+        
+        std::thread([clientFd]() {
+            char buffer[4096] = {0};
+            ssize_t bytesRead = read(clientFd, buffer, sizeof(buffer) - 1);
+            
+            if (bytesRead > 0) {
+                try {
+                    nlohmann::json cmd = nlohmann::json::parse(buffer);
+                    std::string action = cmd.value("cmd", "");
+                    
+                    if (action == "play") {
+                        std::string filePath = cmd.value("file", "");
+                        if (!filePath.empty()) {
+                            PlayCommand playCmd = {filePath, std::chrono::steady_clock::now()};
+                            
+                            {
+                                std::lock_guard<std::mutex> lock(queueMutex);
+                                commandQueue.push(playCmd);
+                            }
+                            queueCv.notify_one();
+                            
+                            std::string response = R"({"ok":true,"detail":"queued"})";
+                            write(clientFd, response.c_str(), response.size());
+                        }
+                    } else if (action == "stop") {
+                        // Clear queue and stop current playback
+                        {
+                            std::lock_guard<std::mutex> lock(queueMutex);
+                            std::queue<PlayCommand> empty;
+                            commandQueue.swap(empty);
+                        }
+                        
+                        std::string response = R"({"ok":true,"detail":"stopped"})";
+                        write(clientFd, response.c_str(), response.size());
+                    }
+                } catch (const std::exception& e) {
+                    std::string response = R"({"ok":false,"error":"parse_error"})";
+                    write(clientFd, response.c_str(), response.size());
+                }
+            }
+            
+            close(clientFd);
+        }).detach();
+    }
 }
 
 bool loadPlaylist(const std::string& playlistPath) {
@@ -87,35 +310,6 @@ uint32_t findMatchingPWM(uint32_t targetPWM) {
     return 0;  // No match found within tolerance
 }
 
-void cleanupExpiredConfirmations() {
-    auto now = std::chrono::steady_clock::now();
-    auto it = pendingConfirmations.begin();
-    
-    while (it != pendingConfirmations.end()) {
-        auto timeDiff = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.firstDetectionTime).count();
-        if (timeDiff > CONFIRMATION_TIMEOUT_MS) {
-            std::cout << "[TIMEOUT] PWM " << it->first << "us confirmation expired after " << timeDiff << "ms" << std::endl;
-            it = pendingConfirmations.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-bool checkPWMConfirmation(uint32_t rawPWM, uint32_t targetPWM) {
-    auto now = std::chrono::steady_clock::now();
-    
-    cleanupExpiredConfirmations();
-    
-    auto it = pendingConfirmations.find(targetPWM);
-    
-    // 2번 신호 확인 로직 주석 처리: 신호가 1번만 들어와도 바로 실행
-    // if (it == pendingConfirmations.end()) {
-    //     ... (중복 확인 및 대기 로직) ...
-    // }
-    return true;
-}
-
 void signalHandler(int sig) {
     std::cerr << "[SIGNAL] Terminated by signal " << sig << "\n";
     cleanup(0);
@@ -135,12 +329,6 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         // Log all incoming PWM values
         std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
         
-        // Check if rpi_play is currently running - ignore new signals
-        if (childPid > 0) {
-            std::cout << "[BUSY] rpi_play is currently running (pid=" << childPid << "), ignoring PWM " << pw << "us" << std::endl;
-            return;
-        }
-        
         auto now = std::chrono::steady_clock::now();
         int diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommandTime).count();
         if (diff < COOLDOWN_MS) {
@@ -150,13 +338,10 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
 
         // Check for stop signal (3000us PWM)
         if (std::abs(static_cast<int32_t>(pw - 3000)) <= 25) {
-            std::cout << "[STOP] PWM 3000us received - stopping rpi_play\n";
-            if (childPid > 0) {
-                std::cout << "[STOP] Killing rpi_play (pid=" << childPid << ")\n";
-                kill(childPid, SIGTERM);
-                waitpid(childPid, nullptr, 0);
-                childPid = -1;
-            }
+            std::cout << "[STOP] PWM 3000us received - stopping playback\n";
+            nlohmann::json stopCmd = {{"cmd", "stop"}};
+            sendCommandToDaemon(stopCmd);
+            lastCommandTime = now;
             return;
         }
 
@@ -169,45 +354,21 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         
         std::cout << "[MATCH_FOUND] Raw PWM " << pw << "us -> Playlist PWM " << matchingPWM << "us" << std::endl;
         
-        // Clear any different pending PWM confirmations
-        auto it = pendingConfirmations.begin();
-        while (it != pendingConfirmations.end()) {
-            if (it->first != matchingPWM) {
-                std::cout << "[CLEAR] Clearing different pending PWM " << it->first 
-                          << "us due to new target " << matchingPWM << "us" << std::endl;
-                it = pendingConfirmations.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        
-        // Check confirmation (this will handle the 0.5s wait internally)
-        if (!checkPWMConfirmation(pw, matchingPWM)) {
-            return; // Either waiting or failed confirmation
-        }
-        
-        // Confirmed and ready to execute
+        // Send play command to daemon
         std::string filename = pwmPlaylist[matchingPWM];
-        std::cout << "[EXECUTE] Confirmed PWM " << matchingPWM << "us -> " << filename << std::endl;
-        
         std::string binFilePath = "./src/bin_files/" + filename;
         
-        lastCommandTime = now;
-
-        // rpi_play가 실행 중이 아닐 때만 새로운 프로세스 시작
-        std::cout << "[TRIGGER] Executing rpi_play with " << binFilePath << "..." << std::endl;
-
-        childPid = fork();
-        if (childPid == 0) {
-            // 자식 프로세스: rpi_play 실행
-            execlp("sudo", "sudo", "chrt", "-f", "98",
-                   "./build/rpi_play",
-                   binFilePath.c_str(),
-                   (char*)nullptr);
-            std::cerr << "[ERROR] Failed to exec rpi_play" << std::endl;
-            exit(1);
-        } else if (childPid < 0) {
-            std::cerr << "[ERROR] fork failed" << std::endl;
+        nlohmann::json playCmd = {
+            {"cmd", "play"},
+            {"file", binFilePath}
+        };
+        
+        std::cout << "[DAEMON_CMD] Sending play command: " << filename << std::endl;
+        if (sendCommandToDaemon(playCmd)) {
+            lastCommandTime = now;
+            std::cout << "[SUCCESS] Command sent successfully" << std::endl;
+        } else {
+            std::cerr << "[ERROR] Failed to send command to daemon" << std::endl;
         }
     }
 }
@@ -230,40 +391,53 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Warm cache for all playlist files
+    std::cout << "[CACHE_WARM] Warming cache for playlist files...\n";
+    for (const auto& [pwm, filename] : pwmPlaylist) {
+        std::string binFilePath = "./src/bin_files/" + filename;
+        warmFileCache(binFilePath);
+    }
+    
+    // Warm the rpi_play binary itself
+    warmFileCache("./build/rpi_play");
+
     if (gpioInitialise() < 0) {
         std::cerr << "[ERROR] pigpio init failed.\n";
         return 1;
     }
 
+    // Start daemon threads
+    std::cout << "[DAEMON] Starting daemon threads...\n";
+    std::thread workerThread(daemonWorker);
+    std::thread socketThread(daemonSocketServer);
+    
+    // Wait a bit for daemon to initialize
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
     gpioSetMode(PWM_GPIO, PI_INPUT);
     gpioSetAlertFunc(PWM_GPIO, pwmCallback);
 
-    std::cout << "[READY] Waiting for PWM trigger on GPIO " << PWM_GPIO << "..." << std::endl;
+    std::cout << "[READY] PWM controller ready on GPIO " << PWM_GPIO << std::endl;
     std::cout << "[INFO] Loaded " << pwmPlaylist.size() << " playlist entries" << std::endl;
-    std::cout << "[INFO] PWM confirmation timeout: " << CONFIRMATION_TIMEOUT_MS << "ms" << std::endl;
+    std::cout << "[INFO] Daemon socket: " << SOCK_PATH << std::endl;
     
-    while (true) {
+    // Main loop - just keep alive and handle signals
+    while (daemonRunning) {
         struct timespec sleepTime = {1, 0}; // 1초씩 sleep
         nanosleep(&sleepTime, nullptr);
-        
-        // Check if child process is still running
-        if (childPid > 0) {
-            int status;
-            pid_t result = waitpid(childPid, &status, WNOHANG);
-            if (result == childPid) {
-                // Child process has terminated
-                std::cout << "[FINISHED] rpi_play process (pid=" << childPid << ") has finished" << std::endl;
-                childPid = -1;  // Reset to allow new signals
-            } else if (result == -1) {
-                // Error occurred
-                std::cerr << "[ERROR] waitpid failed for pid=" << childPid << std::endl;
-                childPid = -1;  // Reset to allow new signals
-            }
-            // If result == 0, child is still running
-        }
-        
-        // 주기적으로 expired 정리 (이제 덜 중요함)
-        cleanupExpiredConfirmations();
+    }
+
+    // Cleanup
+    std::cout << "[SHUTDOWN] Shutting down daemon threads...\n";
+    
+    daemonRunning = false;
+    queueCv.notify_all();
+    
+    if (workerThread.joinable()) {
+        workerThread.join();
+    }
+    if (socketThread.joinable()) {
+        socketThread.join();
     }
 
     cleanup(0);
