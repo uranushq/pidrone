@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <pigpio.h>
 #include <iostream>
 #include <csignal>
@@ -72,12 +73,6 @@ int spawnRpiPlay(const std::string& binFilePath) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     
-    // Set CPU affinity for child process to CPU 3 only (LED control isolation)
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(3, &cpuset);
-    posix_spawnattr_setaffinity_np(&attr, sizeof(cpuset), &cpuset);
-    
     // Set real-time priority
     sched_param sp = {.sched_priority = 98};
     posix_spawnattr_setschedpolicy(&attr, SCHED_FIFO);
@@ -90,7 +85,7 @@ int spawnRpiPlay(const std::string& binFilePath) {
     posix_spawnattr_destroy(&attr);
     
     if (rc == 0) {
-        std::cout << "[SPAWN] rpi_play started with pid=" << pid << " on CPU 3" << std::endl;
+        std::cout << "[SPAWN] rpi_play started with pid=" << pid << std::endl;
         return pid;
     } else {
         std::cerr << "[ERROR] posix_spawn failed: " << strerror(rc) << std::endl;
@@ -246,23 +241,17 @@ void signalHandler(int sig) {
 }
 
 void pwmCallback(int gpio, int level, uint32_t tick) {
-    // Log all GPIO events for debugging
-    std::cout << "[GPIO_EVENT] GPIO=" << gpio << ", level=" << level << ", tick=" << tick << std::endl;
-    
     if (level == 1) {
         lastTick = tick;
-        std::cout << "[PWM_START] Rising edge detected at tick=" << tick << std::endl;
     } else if (level == 0) {
         uint32_t pw = tick - lastTick;
-        std::cout << "[PWM_END] Falling edge detected, pulse width=" << pw << "us" << std::endl;
         
-        // Ignore PWM values 50us or below (noise filtering)
-        if (pw <= 50) {
-            std::cout << "[PWM_FILTER] Ignoring short pulse: " << pw << "us" << std::endl;
+        // Ignore PWM values 100us or below (noise filtering) - no logging
+        if (pw <= 100) {
             return;
         }
         
-        // Log all incoming PWM values
+        // Log all incoming PWM values above 100us
         std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
         
         auto now = std::chrono::steady_clock::now();
