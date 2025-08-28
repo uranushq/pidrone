@@ -20,6 +20,20 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <pthread.h>
+
+bool pin_to_cpu3(const char* tag) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(3, &set); // CPU #3
+
+    // 프로세스(현재 스레드)에 affinity 설정
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        std::cerr << "[WARN] " << tag << ": sched_setaffinity failed: " << strerror(errno) << "\n";
+        return false;
+    }
+    return true;
+}
 
 const int PWM_GPIO = 18;
 const int TOL = 10;
@@ -92,6 +106,7 @@ void warmFileCache(const std::string& filePath) {
 
 // Daemon worker thread - handles play commands
 void daemonWorker() {
+    pin_to_cpu3("daemonWorker");
     // Set highest priority for real-time scheduling
     struct sched_param param;
     param.sched_priority = 99;  // Highest priority
@@ -300,10 +315,12 @@ int main(int argc, char* argv[]) {
     // Set highest priority for main process (PWM signal processing)
     struct sched_param param;
     param.sched_priority = 99;  // Highest priority for PWM processing
+
+    pin_to_cpu3("main");
     if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
-        std::cerr << "[WARNING] Failed to set high priority scheduling for main process\n";
+        std::cerr << "[WARNING] Failed to set SCHED_FIFO 99 for main\n";
     } else {
-        std::cout << "[SCHED] Main process set to SCHED_FIFO priority 99\n";
+        std::cout << "[SCHED] Daemon worker set to SCHED_FIFO priority 99\n";
     }
     
     std::set_terminate([]() { cleanup(1); });
