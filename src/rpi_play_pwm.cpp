@@ -72,6 +72,12 @@ int spawnRpiPlay(const std::string& binFilePath) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     
+    // Set CPU affinity for child process to CPU 3 only (LED control isolation)
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(3, &cpuset);
+    posix_spawnattr_setaffinity_np(&attr, sizeof(cpuset), &cpuset);
+    
     // Set real-time priority
     sched_param sp = {.sched_priority = 98};
     posix_spawnattr_setschedpolicy(&attr, SCHED_FIFO);
@@ -84,7 +90,7 @@ int spawnRpiPlay(const std::string& binFilePath) {
     posix_spawnattr_destroy(&attr);
     
     if (rc == 0) {
-        std::cout << "[SPAWN] rpi_play started with pid=" << pid << std::endl;
+        std::cout << "[SPAWN] rpi_play started with pid=" << pid << " on CPU 3" << std::endl;
         return pid;
     } else {
         std::cerr << "[ERROR] posix_spawn failed: " << strerror(rc) << std::endl;
@@ -106,7 +112,10 @@ void warmFileCache(const std::string& filePath) {
 
 // Daemon worker thread - handles play commands
 void daemonWorker() {
-    pin_to_cpu3("daemonWorker");
+    if (pin_to_cpu3("daemonWorker")) {
+        std::cout << "[SCHED] Daemon worker successfully pinned to CPU 3\n";
+    }
+    
     // Set highest priority for real-time scheduling
     struct sched_param param;
     param.sched_priority = 99;  // Highest priority
@@ -237,13 +246,19 @@ void signalHandler(int sig) {
 }
 
 void pwmCallback(int gpio, int level, uint32_t tick) {
+    // Log all GPIO events for debugging
+    std::cout << "[GPIO_EVENT] GPIO=" << gpio << ", level=" << level << ", tick=" << tick << std::endl;
+    
     if (level == 1) {
         lastTick = tick;
+        std::cout << "[PWM_START] Rising edge detected at tick=" << tick << std::endl;
     } else if (level == 0) {
         uint32_t pw = tick - lastTick;
+        std::cout << "[PWM_END] Falling edge detected, pulse width=" << pw << "us" << std::endl;
         
         // Ignore PWM values 50us or below (noise filtering)
         if (pw <= 50) {
+            std::cout << "[PWM_FILTER] Ignoring short pulse: " << pw << "us" << std::endl;
             return;
         }
         
@@ -312,15 +327,27 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
 }
 
 int main(int argc, char* argv[]) {
+    // Pin main process to CPU 0-2 for PWM interrupt processing
+    cpu_set_t main_cpuset;
+    CPU_ZERO(&main_cpuset);
+    CPU_SET(0, &main_cpuset);
+    CPU_SET(1, &main_cpuset);
+    CPU_SET(2, &main_cpuset);
+    
+    if (sched_setaffinity(0, sizeof(main_cpuset), &main_cpuset) != 0) {
+        std::cerr << "[WARN] Failed to set CPU 0-2 affinity for main process: " << strerror(errno) << "\n";
+    } else {
+        std::cout << "[SCHED] Main process pinned to CPU 0-2 for PWM processing\n";
+    }
+    
     // Set highest priority for main process (PWM signal processing)
     struct sched_param param;
     param.sched_priority = 99;  // Highest priority for PWM processing
 
-    pin_to_cpu3("main");
     if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
         std::cerr << "[WARNING] Failed to set SCHED_FIFO 99 for main\n";
     } else {
-        std::cout << "[SCHED] Daemon worker set to SCHED_FIFO priority 99\n";
+        std::cout << "[SCHED] Main PWM process set to SCHED_FIFO priority 99\n";
     }
     
     std::set_terminate([]() { cleanup(1); });
@@ -355,15 +382,25 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Start daemon threads
+    std::cout << "[GPIO] Setting up PWM input on GPIO " << PWM_GPIO << std::endl;
+    
+    // Configure GPIO pin with pull-down to avoid floating state
+    gpioSetMode(PWM_GPIO, PI_INPUT);
+    gpioSetPullUpDown(PWM_GPIO, PI_PUD_DOWN);  // Pull-down to prevent floating
+    
+    // Wait for GPIO setup to stabilize
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    gpioSetAlertFunc(PWM_GPIO, pwmCallback);
+    
+    std::cout << "[GPIO] PWM callback registered for GPIO " << PWM_GPIO << std::endl;
+
+    // Start daemon threads after GPIO setup
     std::cout << "[DAEMON] Starting daemon thread...\n";
     std::thread workerThread(daemonWorker);
     
     // Wait a bit for daemon to initialize
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    gpioSetMode(PWM_GPIO, PI_INPUT);
-    gpioSetAlertFunc(PWM_GPIO, pwmCallback);
 
     std::cout << "[READY] PWM controller ready on GPIO " << PWM_GPIO << std::endl;
     std::cout << "[INFO] Loaded " << pwmPlaylist.size() << " playlist entries" << std::endl;

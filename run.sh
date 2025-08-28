@@ -26,7 +26,7 @@ trap cleanup SIGINT SIGTERM SIGQUIT
 
 # 예제 실행
 echo "[+] rpi_play_pwm 실행 중..."
-sudo taskset -c 3 chrt -f 99 ./build/rpi_play_pwm ./src/jsonFile/playlist.json
+sudo chrt -f 99 ./build/rpi_play_pwm ./src/jsonFile/playlist.json
 
 # 백그라운드 프로세스 대기
 wait
