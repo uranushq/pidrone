@@ -6,8 +6,10 @@
 #include "./lib/PCA9635_RPI.h"
 
 // Initialize PCA9635 boards with I2C addresses
-PCA9635 pca1(0x4e);
-PCA9635 pca2(0x4f);
+PCA9635 pca1(0x40);
+PCA9635 pca2(0x41);
+PCA9635 pca3(0x42);
+PCA9635 pca4(0x44);
 
 // Define LED control structures
 struct Channel {
@@ -30,6 +32,16 @@ RGBChannel getLEDChannel(int ledIndex) {
         case 5: return {{&pca2, 3}, {&pca2, 4}, {&pca2, 5}};
         case 6: return {{&pca2, 6}, {&pca2, 7}, {&pca2, 8}};
         case 7: return {{&pca2, 9}, {&pca2, 10}, {&pca2, 11}};
+
+        case 8: return {{&pca3, 0}, {&pca3, 1}, {&pca3, 2}};
+        case 9: return {{&pca3, 3}, {&pca3, 4}, {&pca3, 5}};
+        case 10: return {{&pca3, 6}, {&pca3, 7}, {&pca3, 8}};
+        case 11: return {{&pca3, 9}, {&pca3, 10}, {&pca3, 11}};
+        case 12: return {{&pca4, 0}, {&pca4, 1}, {&pca4, 2}};
+        case 13: return {{&pca4, 3}, {&pca4, 4}, {&pca4, 5}};
+        case 14: return {{&pca4, 6}, {&pca4, 7}, {&pca4, 8}};
+        case 15: return {{&pca4, 9}, {&pca4, 10}, {&pca4, 11}};
+
         default: return {{nullptr, -1}, {nullptr, -1}, {nullptr, -1}};
     }
 }
@@ -91,7 +103,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, handleExit);
 
     // Initialize all PCA9635 boards
-    bool pca_initialized = pca1.begin() && pca2.begin();
+    bool pca_initialized = pca1.begin() && pca2.begin() && pca3.begin() && pca4.begin();
     if (!pca_initialized) {
         std::cerr << "오류: PCA9635 보드 초기화에 실패했습니다." << std::endl;
         return 1;
