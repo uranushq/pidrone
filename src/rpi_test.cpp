@@ -6,10 +6,10 @@
 #include "./lib/PCA9635_RPI.h"
 
 // Initialize PCA9635 boards with I2C addresses
-PCA9635 pca1(0x40);
-PCA9635 pca2(0x41);
-PCA9635 pca3(0x42);
-PCA9635 pca4(0x44);
+PCA9635 pca1(0x4b);
+PCA9635 pca2(0x4d);
+PCA9635 pca3(0x4e);
+PCA9635 pca4(0x4f);
 
 // Define LED control structures
 struct Channel {
