@@ -378,7 +378,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, handleExit);
 
     // Initialize all PCA9635 boards
-    bool pca_initialized = pca1.begin() && pca2.begin() && pca3.begin();
+    bool pca_initialized = pca1.begin() && pca2.begin() && pca3.begin() && pca4.begin();
     if (!pca_initialized) {
         std::cerr << "Warning: Failed to initialize PCA9635 boards. Continuing for file validation...\n";
     } else {
