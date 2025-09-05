@@ -372,6 +372,8 @@ int main(int argc, char* argv[]) {
     // Warm the rpi_play binary itself
     warmFileCache("./build/rpi_play");
 
+    gpioCfgClock(3, PI_CLOCK_PCM, 1);
+
     if (gpioInitialise() < 0) {
         std::cerr << "[ERROR] pigpio init failed.\n";
         return 1;
