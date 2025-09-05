@@ -58,9 +58,6 @@ std::queue<PlayCommand> commandQueue;
 std::mutex queueMutex;
 std::condition_variable queueCv;
 
-static uint32_t last_fall_tick = 0;
-static bool have_fall = false;
-
 extern char **environ;
 
 void cleanup(int code) {
@@ -243,28 +240,50 @@ void signalHandler(int sig) {
     cleanup(0);
 }
 
+static uint32_t last_rise_tick = 0;
+static bool have_rise = false;
+static bool armed = false;        // 첫 에지 들어오면 true
+static bool drop_first = false;   // 첫 "완성된" HIGH 주기 한 번 버림
+
 void pwmCallback(int gpio, int level, uint32_t tick) {
-    if (level == 0) {
-        last_fall_tick = tick;
-        have_fall = true;
+    if (level == 1) { // 상승 에지: HIGH 시작
+        last_rise_tick = tick;
+        have_rise = true;
+
+        // 아직 동기화 전이면 이 에지부터 시작.
+        if (!armed) {
+            armed = true;
+            drop_first = true; // 다음에 완성될 첫 HIGH 폭은 버린다
+        }
         return;
     }
-    if (level == 1) {
-        if (!have_fall) return;
 
-        uint32_t low_pw = tick - last_fall_tick;
-        if (low_pw <= 100) return;
+    if (level == 0) { // 하강 에지: HIGH 종료 => HIGH 폭 계산
+        if (!have_rise) return; // 시작(상승)을 못봤으면 스킵
+
+        uint32_t high_pw = tick - last_rise_tick;
+        have_rise = false;
+
+        // 100us 이하 노이즈 컷
+        if (high_pw <= 100) return;
+
+        // 동기화 직후 첫 완전 주기 드랍
+        if (drop_first) {
+            drop_first = false;
+            return;
+        }
 
         // 쿨다운 체크
         auto now = std::chrono::steady_clock::now();
         int diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommandTime).count();
         if (diff < COOLDOWN_MS) {
+            // std::cout << "[COOLDOWN] Ignoring HIGH " << high_pw << "us (cooldown: " << diff << "ms)\n";
             return;
         }
 
-        // 재생 중이면 STOP(예: 3000us)만 허용
+        // 재생 중이면 STOP만 허용 (여기선 HIGH 폭 3000us를 STOP으로 가정)
         if (isPlaying) {
-            if (std::abs((int32_t)low_pw - 3000) <= 25) {
+            if (std::abs((int32_t)high_pw - 3000) <= 25) {
                 PlayCommand stopCmd; stopCmd.binFilePath = "STOP"; stopCmd.timestamp = now;
                 { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
                 queueCv.notify_one();
@@ -273,8 +292,8 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
             return;
         }
 
-        // STOP 신호 (LOW 폭 3000us) 처리
-        if (std::abs((int32_t)low_pw - 3000) <= 25) {
+        // STOP 신호 별도 처리 (필요 없으면 제거)
+        if (std::abs((int32_t)high_pw - 3000) <= 25) {
             PlayCommand stopCmd; stopCmd.binFilePath = "STOP"; stopCmd.timestamp = now;
             { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
             queueCv.notify_one();
@@ -282,9 +301,10 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
             return;
         }
 
-        // LOW 폭으로만 매칭
-        uint32_t matchingPWM = findMatchingPWM(low_pw);
+        // HIGH 폭으로만 매칭
+        uint32_t matchingPWM = findMatchingPWM(high_pw);
         if (matchingPWM == 0) {
+            // std::cout << "[NO_MATCH] HIGH " << high_pw << "us\n";
             return;
         }
 
@@ -296,6 +316,7 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         queueCv.notify_one();
 
         lastCommandTime = now;
+        // std::cout << "[SUCCESS] HIGH " << high_pw << "us -> " << filename << "\n";
     }
 }
 
@@ -360,7 +381,7 @@ int main(int argc, char* argv[]) {
     
     // Configure GPIO pin with pull-down to avoid floating state
     gpioSetMode(PWM_GPIO, PI_INPUT);
-    gpioGlitchFilter(PWM_GPIO, 100);            // 100µs 미만 엣지 무시
+    gpioGlitchFilter(PWM_GPIO, 50);
     gpioSetAlertFunc(PWM_GPIO, pwmCallback);
 
     gpioSetPullUpDown(PWM_GPIO, PI_PUD_DOWN);  // Pull-down to prevent floating
