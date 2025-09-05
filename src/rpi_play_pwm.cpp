@@ -58,6 +58,9 @@ std::queue<PlayCommand> commandQueue;
 std::mutex queueMutex;
 std::condition_variable queueCv;
 
+static uint32_t last_fall_tick = 0;
+static bool have_fall = false;
+
 extern char **environ;
 
 void cleanup(int code) {
@@ -241,79 +244,61 @@ void signalHandler(int sig) {
 }
 
 void pwmCallback(int gpio, int level, uint32_t tick) {
+    if (level == 0) {
+        last_fall_tick = tick;
+        have_fall = true;
+        return;
+    }
     if (level == 1) {
-        lastTick = tick;
-    } else if (level == 0) {
-        uint32_t pw = tick - lastTick;
-        
-        // Ignore PWM values 100us or below (noise filtering) - no logging
-        if (pw <= 100) {
-            return;
-        }
-        
-        // Log all incoming PWM values above 100us
-        std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
-        
+        if (!have_fall) return;
+
+        uint32_t low_pw = tick - last_fall_tick;
+        if (low_pw <= 100) return;
+
+        // 쿨다운 체크
         auto now = std::chrono::steady_clock::now();
         int diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommandTime).count();
         if (diff < COOLDOWN_MS) {
-            std::cout << "[COOLDOWN] Ignoring PWM " << pw << "us (cooldown: " << diff << "ms)" << std::endl;
             return;
         }
 
-        // Check for stop signal (3000us PWM) - 항상 처리
-        if (std::abs(static_cast<int32_t>(pw - 3000)) <= 25) {
-            std::cout << "[STOP] PWM 3000us received - stopping playback\n";
-            
-            // Send stop command to daemon
-            PlayCommand stopCmd;
-            stopCmd.binFilePath = "STOP";
-            stopCmd.timestamp = now;
-            
-            {
-                std::lock_guard<std::mutex> lock(queueMutex);
-                commandQueue.push(stopCmd);
+        // 재생 중이면 STOP(예: 3000us)만 허용
+        if (isPlaying) {
+            if (std::abs((int32_t)low_pw - 3000) <= 25) {
+                PlayCommand stopCmd; stopCmd.binFilePath = "STOP"; stopCmd.timestamp = now;
+                { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
+                queueCv.notify_one();
+                lastCommandTime = now;
             }
+            return;
+        }
+
+        // STOP 신호 (LOW 폭 3000us) 처리
+        if (std::abs((int32_t)low_pw - 3000) <= 25) {
+            PlayCommand stopCmd; stopCmd.binFilePath = "STOP"; stopCmd.timestamp = now;
+            { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
             queueCv.notify_one();
-            
             lastCommandTime = now;
             return;
         }
-        
-        // 재생 중이면 다른 모든 신호 무시
-        if (isPlaying) {
-            std::cout << "[PLAYING] Ignoring PWM " << pw << "us (playback in progress, only stop signal accepted)" << std::endl;
+
+        // LOW 폭으로만 매칭
+        uint32_t matchingPWM = findMatchingPWM(low_pw);
+        if (matchingPWM == 0) {
             return;
         }
 
-        // Find matching PWM value in playlist
-        uint32_t matchingPWM = findMatchingPWM(pw);
-        if (matchingPWM == 0) {
-            std::cout << "[NO_MATCH] PWM " << pw << "us not found in playlist" << std::endl;
-            return;
-        }
-        std::cout << "[MATCH_FOUND] Raw PWM " << pw << "us -> Playlist PWM " << matchingPWM << "us" << std::endl;
-        
-        // Send play command to daemon
         std::string filename = pwmPlaylist[matchingPWM];
         std::string binFilePath = "./src/bin_files/" + filename;
-        
-        PlayCommand playCmd;
-        playCmd.binFilePath = binFilePath;
-        playCmd.timestamp = now;
-        
-        std::cout << "[DAEMON_CMD] Sending play command: " << filename << std::endl;
-        
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            commandQueue.push(playCmd);
-        }
+
+        PlayCommand playCmd; playCmd.binFilePath = binFilePath; playCmd.timestamp = now;
+        { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(playCmd); }
         queueCv.notify_one();
-        
+
         lastCommandTime = now;
-        std::cout << "[SUCCESS] Command sent successfully" << std::endl;
     }
 }
+
 
 int main(int argc, char* argv[]) {
     // Pin main process to CPU 0-2 for PWM interrupt processing
@@ -375,6 +360,9 @@ int main(int argc, char* argv[]) {
     
     // Configure GPIO pin with pull-down to avoid floating state
     gpioSetMode(PWM_GPIO, PI_INPUT);
+    gpioGlitchFilter(PWM_GPIO, 100);            // 100µs 미만 엣지 무시
+    gpioSetAlertFunc(PWM_GPIO, pwmCallback);
+
     gpioSetPullUpDown(PWM_GPIO, PI_PUD_DOWN);  // Pull-down to prevent floating
     
     // Wait for GPIO setup to stabilize
