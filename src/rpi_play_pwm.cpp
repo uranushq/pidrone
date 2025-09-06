@@ -389,9 +389,9 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
             return;
         }
 
-        // 재생 중: STOP(3000us 근처)만 허용
+        // 재생 중: STOP(2500us 근처)만 허용
         if (isPlaying) {
-            if (std::abs((int32_t)filt - 3000) <= (int32_t)MATCH_TOL) {
+            if (std::abs((int32_t)filt - 2500) <= (int32_t)MATCH_TOL) {
                 LOGI("[STOP] while playing: filt=" << filt << "us (tol " << MATCH_TOL << ")");
                 PlayCommand stopCmd{ "STOP", now };
                 { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
@@ -404,7 +404,7 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         }
 
         // STOP 개별 처리
-        if (std::abs((int32_t)filt - 3000) <= (int32_t)MATCH_TOL) {
+        if (std::abs((int32_t)filt - 2500) <= (int32_t)MATCH_TOL) {
             LOGI("[STOP] request filt=" << filt << "us");
             PlayCommand stopCmd{ "STOP", now };
             { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
