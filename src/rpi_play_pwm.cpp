@@ -24,6 +24,8 @@
 #include <pthread.h>
 #include <vector>
 #include <cerrno>
+#include <cstring>
+#include <algorithm>
 
 extern char **environ;
 
@@ -39,6 +41,19 @@ static uint32_t last_rise_tick = 0;
 static bool have_rise = false;
 static bool armed = false;        // 첫 에지 이후 true
 static bool drop_first = false;   // 무장 후 첫 사이클 드롭
+
+// 주기(상승~상승) 검증용
+static uint32_t prev_rise_tick = 0;
+static bool have_prev_rise = false;
+
+// 미디안(3) 필터
+static uint32_t hi_buf[3] = {0,0,0};
+static int hi_idx = 0;
+static int hi_cnt = 0;
+
+// 디바운스: 같은 버킷 2회 연속
+static uint32_t last_bucket = 0;
+static int same_bucket_cnt = 0;
 
 uint32_t lastTick = 0;
 std::chrono::steady_clock::time_point lastCommandTime;
@@ -145,22 +160,22 @@ int spawnRpiPlay(const std::string& binFilePath) {
         std::cout << "[SCHED] Child pinned to CPU3 (pid=" << pid << ")\n";
     }
 
-    // 우선순위 재확인/보강(일부 libc/커널 조합에서 spawn 이후 재적용이 안전)
+    // 우선순위 재확인/보강
     if (sched_setscheduler(pid, SCHED_FIFO, &sp) != 0) {
         std::cerr << "[WARN] child sched_setscheduler(" << pid << ") failed: "
                   << strerror(errno) << "\n";
     }
 
-    std::cout << "[SPAWN] rpi_play started with pid=" << pid << "\n";
+    std::cout << "[SPAWN] rpi_play started with pid=" << pid << " file=" << binFilePath << "\n";
     return pid;
 }
 
 // ====== 데몬 워커 ======
 void daemonWorker() {
-    // 워커 스레드는 CPU3에 핀(원하면 유지, 필수는 아님. 자식이 3번을 먹으므로 영향 최소)
+    // 워커 스레드 CPU3
     pin_to_cpu3("daemonWorker");
 
-    // 워커도 RT이지만 pigpio 콜백(메인)보다 낮은 98~99 미만 권장
+    // pigpio 콜백(메인)보다 낮은 RT
     struct sched_param param{ .sched_priority = 95 };
     if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
         std::cerr << "[WARNING] Failed to set SCHED_FIFO 95 for daemon worker\n";
@@ -234,6 +249,14 @@ void daemonWorker() {
     std::cout << "[DAEMON_WORKER] Stopped\n";
 }
 
+// ===== 유틸: 미디안(3) =====
+static inline uint32_t median3(uint32_t a, uint32_t b, uint32_t c){
+    if (a>b) std::swap(a,b);
+    if (b>c) std::swap(b,c);
+    if (a>b) std::swap(a,b);
+    return b;
+}
+
 // ====== PWM 콜백(HIGH 폭 기준) ======
 void pwmCallback(int gpio, int level, uint32_t tick) {
     if (level == 1) { // rising: HIGH 시작
@@ -243,6 +266,7 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         if (!armed) {           // 무장: 첫 에지 이후부터 정상 측정
             armed = true;
             drop_first = true;  // 무장 직후 첫 완성 사이클 버림
+            have_prev_rise = false;
         }
         return;
     }
@@ -256,8 +280,33 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         // sanity guard
         if (high_pw < MIN_HIGH_US || high_pw > MAX_HIGH_US) return;
 
-        // 무장 직후 1사이클 드롭
-        if (drop_first) { drop_first = false; return; }
+        // 무장 직후 1사이클 드랍 + 주기 기준 초기화
+        if (drop_first) {
+            drop_first = false;
+            prev_rise_tick = last_rise_tick;
+            have_prev_rise = true;
+            return;
+        }
+
+        // 주기(상승~상승) 검사: 15~25ms 범위 내에서만 신뢰
+        if (!have_prev_rise) {
+            prev_rise_tick = last_rise_tick;
+            have_prev_rise = true;
+            return;
+        } else {
+            uint32_t period = last_rise_tick - prev_rise_tick;
+            prev_rise_tick = last_rise_tick;
+            if (period < 15000 || period > 25000) {
+                // std::cout << "[PERIOD] reject " << period << "us\n";
+                return;
+            }
+        }
+
+        // 미디안(3) 필터
+        hi_buf[hi_idx] = high_pw;
+        hi_idx = (hi_idx + 1) % 3;
+        if (hi_cnt < 3) hi_cnt++;
+        uint32_t filt = (hi_cnt == 3) ? median3(hi_buf[0], hi_buf[1], hi_buf[2]) : high_pw;
 
         // 쿨다운
         auto now = std::chrono::steady_clock::now();
@@ -266,7 +315,7 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
 
         // 재생 중이면 STOP(3000us 근처)만 허용
         if (isPlaying) {
-            if (std::abs((int32_t)high_pw - 3000) <= (int32_t)MATCH_TOL) {
+            if (std::abs((int32_t)filt - 3000) <= (int32_t)MATCH_TOL) {
                 PlayCommand stopCmd{ "STOP", now };
                 { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
                 queueCv.notify_one();
@@ -276,7 +325,7 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         }
 
         // STOP 처리
-        if (std::abs((int32_t)high_pw - 3000) <= (int32_t)MATCH_TOL) {
+        if (std::abs((int32_t)filt - 3000) <= (int32_t)MATCH_TOL) {
             PlayCommand stopCmd{ "STOP", now };
             { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(stopCmd); }
             queueCv.notify_one();
@@ -284,17 +333,34 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
             return;
         }
 
-        // 매칭
-        uint32_t m = findMatchingPWM(high_pw);
-        if (!m) return;
+        // 매칭(버킷)
+        uint32_t m = findMatchingPWM(filt);
+        if (!m) {
+            same_bucket_cnt = 0;
+            last_bucket = 0;
+            return;
+        }
 
+        // 같은 버킷 2회 연속 디바운스
+        if (last_bucket == m) same_bucket_cnt++;
+        else { last_bucket = m; same_bucket_cnt = 1; }
+
+        if (same_bucket_cnt < 2) {
+            // std::cout << "[DEBOUNCE] bucket " << m << " x" << same_bucket_cnt << "\n";
+            return;
+        }
+
+        // 발사
         std::string filename = pwmPlaylist[m];
         std::string path = "./src/bin_files/" + filename;
 
         PlayCommand playCmd{ path, now };
         { std::lock_guard<std::mutex> lk(queueMutex); commandQueue.push(playCmd); }
         queueCv.notify_one();
+
         lastCommandTime = now;
+        same_bucket_cnt = 0;
+        // std::cout << "[CMD] " << filt << "us -> " << filename << "\n";
     }
 }
 
