@@ -408,7 +408,7 @@ int main(int argc, char* argv[]) {
     // Play the loaded bin file
     const auto& frames = binDataMap[filename];
     
-    const int interval_us = 200'000;
+    const int interval_us = 067'000;
     struct timespec nextFrameTime, actualTime;
     clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
     
