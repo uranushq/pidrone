@@ -12,11 +12,11 @@
 #include "./lib/PCA9635_RPI.h"
 #include <time.h>
 
-
 // Initialize PCA9635 boards with I2C addresses
-PCA9635 pca1(0x40);
-PCA9635 pca2(0x41);
-PCA9635 pca3(0x42);
+PCA9635 pca1(0x4b);
+PCA9635 pca2(0x4d);
+PCA9635 pca3(0x4e);
+PCA9635 pca4(0x4f);
 
 std::map<std::string, std::vector<std::vector<uint8_t>>> binDataMap;
 
@@ -42,19 +42,21 @@ RGBChannel getLEDChannel(int ledIndex) {
         case 1: return {{&pca1, 3}, {&pca1, 4}, {&pca1, 5}};
         case 2: return {{&pca1, 6}, {&pca1, 7}, {&pca1, 8}};
         case 3: return {{&pca1, 9}, {&pca1, 10}, {&pca1, 11}};
-        case 4: return {{&pca1, 12}, {&pca1, 13}, {&pca1, 14}};
-        case 5: return {{&pca1, 15}, {&pca2, 0}, {&pca2, 1}};
-        case 6: return {{&pca2, 2}, {&pca2, 3}, {&pca2, 4}};
-        case 7: return {{&pca2, 5}, {&pca2, 6}, {&pca2, 7}};
-        case 8: return {{&pca2, 8}, {&pca2, 9}, {&pca2, 10}};
-        case 9: return {{&pca2, 11}, {&pca2, 12}, {&pca2, 13}};
-        case 10:return {{&pca2, 14}, {&pca2, 15}, {&pca3, 0}};
-        case 11:return {{&pca3, 1}, {&pca3, 2}, {&pca3, 3}};
-        case 12:return {{&pca3, 4}, {&pca3, 5}, {&pca3, 6}};
-        case 13:return {{&pca3, 7}, {&pca3, 8}, {&pca3, 9}};
-        case 14:return {{&pca3, 10}, {&pca3, 11}, {&pca3, 12}};
-        case 15:return {{&pca3, 13}, {&pca3, 14}, {&pca3, 15}};
-        default:return {{nullptr, -1}, {nullptr, -1}, {nullptr, -1}};
+        case 4: return {{&pca2, 0}, {&pca2, 1}, {&pca2, 2}};
+        case 5: return {{&pca2, 3}, {&pca2, 4}, {&pca2, 5}};
+        case 6: return {{&pca2, 6}, {&pca2, 7}, {&pca2, 8}};
+        case 7: return {{&pca2, 9}, {&pca2, 10}, {&pca2, 11}};
+
+        case 8: return {{&pca3, 0}, {&pca3, 1}, {&pca3, 2}};
+        case 9: return {{&pca3, 3}, {&pca3, 4}, {&pca3, 5}};
+        case 10: return {{&pca3, 6}, {&pca3, 7}, {&pca3, 8}};
+        case 11: return {{&pca3, 9}, {&pca3, 10}, {&pca3, 11}};
+        case 12: return {{&pca4, 0}, {&pca4, 1}, {&pca4, 2}};
+        case 13: return {{&pca4, 3}, {&pca4, 4}, {&pca4, 5}};
+        case 14: return {{&pca4, 6}, {&pca4, 7}, {&pca4, 8}};
+        case 15: return {{&pca4, 9}, {&pca4, 10}, {&pca4, 11}};
+
+        default: return {{nullptr, -1}, {nullptr, -1}, {nullptr, -1}};
     }
 }
 
@@ -222,7 +224,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, handleExit);
 
     // Initialize all PCA9635 boards
-    if (!pca1.begin() || !pca2.begin() || !pca3.begin()) {
+    if (!pca1.begin() || !pca2.begin() || !pca3.begin() || !pca4.begin()) {
         std::cerr << "Failed to initialize PCA9635 boards.\n";
         return 1;
     }
