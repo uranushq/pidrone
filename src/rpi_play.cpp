@@ -246,7 +246,7 @@ int main(int argc, char* argv[]) {
 
         const auto& frames = binDataMap[entry.filename];
         
-        const int interval_us = 30'000;
+        const int interval_us = 15'000;
         struct timespec nextFrameTime;
         clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
         
