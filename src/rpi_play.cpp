@@ -298,17 +298,13 @@ std::vector<ScheduleEntry> loadSchedule(const std::string& jsonPath) {
 
     std::vector<ScheduleEntry> schedule;
     
-    // Check if it's the new format (object with PWM keys) or old format (array)
-    if (j.is_object() && !j.empty()) {
-        // New format: {"900": {"filename": "...", "time": "..."}, ...}
-        for (auto& [pwmKey, item] : j.items()) {
-            schedule.push_back({ item["filename"], parseCompactTime(item["time"]) });
-        }
-    } else if (j.is_array()) {
-        // Old format: [{"filename": "...", "time": "..."}, ...]
+    // Expect array format: [{"filename": "...", "time": "..."}, ...]
+    if (j.is_array()) {
         for (auto& item : j) {
             schedule.push_back({ item["filename"], parseCompactTime(item["time"]) });
         }
+    } else {
+        std::cerr << "[ERROR] Expected array format in playlist JSON\n";
     }
     
     return schedule;
@@ -338,18 +334,30 @@ int main(int argc, char* argv[]) {
 
     // Check if enough arguments are provided
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <bin_file_path>\n";
+        std::cerr << "Usage: " << argv[0] << " <playlist_json_file>\n";
         return 1;
     }
 
-    std::string binFilePath = argv[1];
+    std::string playlistPath = argv[1];
+    const std::string binFilePath = "./src/bin_files/";
     
-    std::cout << "Loading bin file: " << binFilePath << std::endl;
+    std::cout << "Loading playlist: " << playlistPath << std::endl;
     
-    // Read image dimensions from the bin file
+    // Load schedule from playlist.json
+    auto schedule = loadSchedule(playlistPath);
+    if (schedule.empty()) {
+        std::cerr << "No files in playlist or failed to load playlist\n";
+        return 1;
+    }
+    
+    // Get the first file from playlist to read dimensions
+    std::string firstBinFile = binFilePath + schedule[0].filename;
+    std::cout << "Reading dimensions from: " << firstBinFile << std::endl;
+    
+    // Read image dimensions from the first bin file
     int total_row, total_col;
-    if (!getImageDimensions(binFilePath, total_row, total_col)) {
-        std::cerr << "Failed to read image dimensions from: " << binFilePath << std::endl;
+    if (!getImageDimensions(firstBinFile, total_row, total_col)) {
+        std::cerr << "Failed to read image dimensions from: " << firstBinFile << std::endl;
         return 1;
     }
     
@@ -384,19 +392,18 @@ int main(int argc, char* argv[]) {
         std::cout << "PCA9635 boards initialized successfully.\n";
     }
     
-    // Load the single bin file
-    std::cout << "Loading bin file: " << binFilePath << std::endl;
-    
-    // Extract just the filename from the full path
-    std::string filename = binFilePath.substr(binFilePath.find_last_of("/\\") + 1);
-    std::string path = binFilePath.substr(0, binFilePath.find_last_of("/\\") + 1);
-    
-    if (!loadBinFile(path, filename, frameSize)) {
-        std::cerr << "Failed to load: " << binFilePath << std::endl;
-        return 1;
-    } else {
-        std::cout << "Successfully loaded: " << filename << " with " 
-                 << binDataMap[filename].size() << " frames" << std::endl;
+    // Load all bin files from the schedule
+    for (const auto& entry : schedule) {
+        if (binDataMap.find(entry.filename) == binDataMap.end()) {
+            std::cout << "Loading bin file: " << entry.filename << std::endl;
+            if (!loadBinFile(binFilePath, entry.filename, frameSize)) {
+                std::cerr << "Failed to load: " << entry.filename << std::endl;
+                return 1;
+            } else {
+                std::cout << "Successfully loaded: " << entry.filename << " with " 
+                         << binDataMap[entry.filename].size() << " frames" << std::endl;
+            }
+        }
     }
     
     if (!pca_initialized) {
@@ -404,92 +411,103 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // Play the loaded bin file
-    const auto& frames = binDataMap[filename];
-    
-    const int interval_us = 200'000;
-    struct timespec nextFrameTime, actualTime;
-    clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
-    
-    int frameIndex = 0;
-    for (const auto& frame : frames) {
-        // Log frame start time and LED sending start
-        clock_gettime(CLOCK_MONOTONIC, &actualTime);
-        std::cout << "[FRAME_START] Frame " << frameIndex << " start at " 
-                  << actualTime.tv_sec << "." << std::setfill('0') << std::setw(9) << actualTime.tv_nsec 
-                  << std::endl;
+    // Play each scheduled file
+    for (const auto& entry : schedule) {
+        auto now = std::chrono::system_clock::now();
+        if (entry.playTime > now) {
+            std::this_thread::sleep_until(entry.playTime);
+        }
+
+        const auto& frames = binDataMap[entry.filename];
         
-        // Measure LED sending time
-        auto ledSendStart = std::chrono::high_resolution_clock::now();
+        const int interval_us = 200'000;
+        struct timespec nextFrameTime, actualTime;
+        clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
         
-        // Extract 4x4 region for this raspberry pi from the full image frame
-        // Python code flattens as: [pixel for row in matrix for pixel in row]
-        // This means row-major order: row 0 all pixels, then row 1 all pixels, etc.
-        for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
-            for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
-                // Calculate global position in the full image
-                // Flip the row order to fix upside-down issue
-                int global_row = (n_row - 1 - pi_row) * local_pixel_size + local_row;
-                int global_col = pi_col * local_pixel_size + local_col;
-                
-                // Calculate index in the flattened frame (row-major order)
-                int global_index = global_row * total_col + global_col;
-                
-                // Calculate local LED index (0-15 for 4x4)
-                int local_led_index = local_row * local_pixel_size + local_col;
-                
-                // Set LED with RGB values from the full frame (only if PCA initialized)
-                if (pca_initialized) {
-                    setLED(local_led_index, 
-                           frame[global_index * 3 + 0], 
-                           frame[global_index * 3 + 1], 
-                           frame[global_index * 3 + 2]);
+        std::cout << "Starting playback of: " << entry.filename << " (" << frames.size() << " frames)" << std::endl;
+        
+        int frameIndex = 0;
+        for (const auto& frame : frames) {
+            // Log frame start time and LED sending start
+            clock_gettime(CLOCK_MONOTONIC, &actualTime);
+            std::cout << "[FRAME_START] Frame " << frameIndex << " start at " 
+                      << actualTime.tv_sec << "." << std::setfill('0') << std::setw(9) << actualTime.tv_nsec 
+                      << std::endl;
+            
+            // Measure LED sending time
+            auto ledSendStart = std::chrono::high_resolution_clock::now();
+            
+            // Extract 4x4 region for this raspberry pi from the full image frame
+            // Python code flattens as: [pixel for row in matrix for pixel in row]
+            // This means row-major order: row 0 all pixels, then row 1 all pixels, etc.
+            for (int local_row = 0; local_row < local_pixel_size; ++local_row) {
+                for (int local_col = 0; local_col < local_pixel_size; ++local_col) {
+                    // Calculate global position in the full image
+                    // Flip the row order to fix upside-down issue
+                    int global_row = (n_row - 1 - pi_row) * local_pixel_size + local_row;
+                    int global_col = pi_col * local_pixel_size + local_col;
+                    
+                    // Calculate index in the flattened frame (row-major order)
+                    int global_index = global_row * total_col + global_col;
+                    
+                    // Calculate local LED index (0-15 for 4x4)
+                    int local_led_index = local_row * local_pixel_size + local_col;
+                    
+                    // Set LED with RGB values from the full frame (only if PCA initialized)
+                    if (pca_initialized) {
+                        setLED(local_led_index, 
+                               frame[global_index * 3 + 0], 
+                               frame[global_index * 3 + 1], 
+                               frame[global_index * 3 + 2]);
+                    }
                 }
             }
-        }
-        
-        // Measure and log LED sending completion time
-        auto ledSendEnd = std::chrono::high_resolution_clock::now();
-        auto ledDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(ledSendEnd - ledSendStart).count();
-        
-        struct timespec ledSendTime;
-        clock_gettime(CLOCK_MONOTONIC, &ledSendTime);
-        std::cout << "[LED_SENT] Frame " << frameIndex << " LEDs sent at " 
-                  << ledSendTime.tv_sec << "." << std::setfill('0') << std::setw(9) << ledSendTime.tv_nsec 
-                  << ", LED_duration: " << ledDuration << "ns" << std::endl;
+            
+            // Measure and log LED sending completion time
+            auto ledSendEnd = std::chrono::high_resolution_clock::now();
+            auto ledDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(ledSendEnd - ledSendStart).count();
+            
+            struct timespec ledSendTime;
+            clock_gettime(CLOCK_MONOTONIC, &ledSendTime);
+            std::cout << "[LED_SENT] Frame " << frameIndex << " LEDs sent at " 
+                      << ledSendTime.tv_sec << "." << std::setfill('0') << std::setw(9) << ledSendTime.tv_nsec 
+                      << ", LED_duration: " << ledDuration << "ns" << std::endl;
 
-        nextFrameTime.tv_nsec += interval_us * 1000;
-        if (nextFrameTime.tv_nsec >= 1000000000) {
-            nextFrameTime.tv_sec += 1;
-            nextFrameTime.tv_nsec -= 1000000000;
+            nextFrameTime.tv_nsec += interval_us * 1000;
+            if (nextFrameTime.tv_nsec >= 1000000000) {
+                nextFrameTime.tv_sec += 1;
+                nextFrameTime.tv_nsec -= 1000000000;
+            }
+            
+            // Log expected vs actual sleep timing
+            struct timespec beforeSleep, afterSleep;
+            clock_gettime(CLOCK_MONOTONIC, &beforeSleep);
+            
+            std::cout << "[SLEEP_START] Frame " << frameIndex << " sleep start at " 
+                      << beforeSleep.tv_sec << "." << std::setfill('0') << std::setw(9) << beforeSleep.tv_nsec 
+                      << ", target: " << nextFrameTime.tv_sec << "." << std::setfill('0') << std::setw(9) << nextFrameTime.tv_nsec 
+                      << std::endl;
+            
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrameTime, nullptr);
+            
+            clock_gettime(CLOCK_MONOTONIC, &afterSleep);
+            
+            // Calculate timing accuracy
+            long long expectedNs = nextFrameTime.tv_sec * 1000000000LL + nextFrameTime.tv_nsec;
+            long long actualNs = afterSleep.tv_sec * 1000000000LL + afterSleep.tv_nsec;
+            long long beforeNs = beforeSleep.tv_sec * 1000000000LL + beforeSleep.tv_nsec;
+            long long diffNs = actualNs - expectedNs;
+            long long sleepTimeNs = actualNs - beforeNs;
+            long long targetSleepNs = expectedNs - beforeNs;
+            
+            std::cout << "[SLEEP_END] Frame " << frameIndex << " wakeup at " 
+                      << afterSleep.tv_sec << "." << std::setfill('0') << std::setw(9) << afterSleep.tv_nsec 
+                      << ", accuracy: " << diffNs << "ns, slept: " << sleepTimeNs 
+                      << "ns, target: " << targetSleepNs << "ns" << std::endl;
+            frameIndex++;
         }
         
-        // Log expected vs actual sleep timing
-        struct timespec beforeSleep, afterSleep;
-        clock_gettime(CLOCK_MONOTONIC, &beforeSleep);
-        
-        std::cout << "[SLEEP_START] Frame " << frameIndex << " sleep start at " 
-                  << beforeSleep.tv_sec << "." << std::setfill('0') << std::setw(9) << beforeSleep.tv_nsec 
-                  << ", target: " << nextFrameTime.tv_sec << "." << std::setfill('0') << std::setw(9) << nextFrameTime.tv_nsec 
-                  << std::endl;
-        
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrameTime, nullptr);
-        
-        clock_gettime(CLOCK_MONOTONIC, &afterSleep);
-        
-        // Calculate timing accuracy
-        long long expectedNs = nextFrameTime.tv_sec * 1000000000LL + nextFrameTime.tv_nsec;
-        long long actualNs = afterSleep.tv_sec * 1000000000LL + afterSleep.tv_nsec;
-        long long beforeNs = beforeSleep.tv_sec * 1000000000LL + beforeSleep.tv_nsec;
-        long long diffNs = actualNs - expectedNs;
-        long long sleepTimeNs = actualNs - beforeNs;
-        long long targetSleepNs = expectedNs - beforeNs;
-        
-        std::cout << "[SLEEP_END] Frame " << frameIndex << " wakeup at " 
-                  << afterSleep.tv_sec << "." << std::setfill('0') << std::setw(9) << afterSleep.tv_nsec 
-                  << ", accuracy: " << diffNs << "ns, slept: " << sleepTimeNs 
-                  << "ns, target: " << targetSleepNs << "ns" << std::endl;
-        frameIndex++;
+        std::cout << "Completed playback of: " << entry.filename << std::endl;
     }
     
     // Turn off all LEDs after playback (only if PCA initialized)
