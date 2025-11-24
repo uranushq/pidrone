@@ -246,72 +246,36 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
     } else if (level == 0) {
         uint32_t pw = tick - lastTick;
         
-        // Ignore PWM values 100us or below (noise filtering) - no logging
-        if (pw <= 100) {
-            return;
-        }
-        
-        // Log all incoming PWM values above 100us
+        // Log all incoming PWM values
         std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
         
-        auto now = std::chrono::steady_clock::now();
-        int diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommandTime).count();
-        if (diff < COOLDOWN_MS) {
-            std::cout << "[COOLDOWN] Ignoring PWM " << pw << "us (cooldown: " << diff << "ms)" << std::endl;
-            return;
-        }
-
-        // Check for stop signal (3000us PWM) - 항상 처리
-        if (std::abs(static_cast<int32_t>(pw - 3000)) <= 25) {
-            std::cout << "[STOP] PWM 3000us received - stopping playback\n";
+        // Check if PWM is around 500us (±25us tolerance)
+        if (std::abs(static_cast<int32_t>(pw - 500)) <= 25) {
+            auto now = std::chrono::steady_clock::now();
             
-            // Send stop command to daemon
-            PlayCommand stopCmd;
-            stopCmd.binFilePath = "STOP";
-            stopCmd.timestamp = now;
+            // Get the filename from playlist (key "500")
+            if (pwmPlaylist.find(500) == pwmPlaylist.end()) {
+                std::cout << "[ERROR] No file found for PWM 500 in playlist" << std::endl;
+                return;
+            }
+            
+            std::string filename = pwmPlaylist[500];
+            std::string binFilePath = "./src/bin_files/" + filename;
+            
+            PlayCommand playCmd;
+            playCmd.binFilePath = binFilePath;
+            playCmd.timestamp = now;
+            
+            std::cout << "[PLAY] PWM ~500us detected -> Playing: " << filename << std::endl;
             
             {
                 std::lock_guard<std::mutex> lock(queueMutex);
-                commandQueue.push(stopCmd);
+                commandQueue.push(playCmd);
             }
             queueCv.notify_one();
             
             lastCommandTime = now;
-            return;
         }
-        
-        // 재생 중이면 다른 모든 신호 무시
-        if (isPlaying) {
-            std::cout << "[PLAYING] Ignoring PWM " << pw << "us (playback in progress, only stop signal accepted)" << std::endl;
-            return;
-        }
-
-        // Find matching PWM value in playlist
-        uint32_t matchingPWM = findMatchingPWM(pw);
-        if (matchingPWM == 0) {
-            std::cout << "[NO_MATCH] PWM " << pw << "us not found in playlist" << std::endl;
-            return;
-        }
-        std::cout << "[MATCH_FOUND] Raw PWM " << pw << "us -> Playlist PWM " << matchingPWM << "us" << std::endl;
-        
-        // Send play command to daemon
-        std::string filename = pwmPlaylist[matchingPWM];
-        std::string binFilePath = "./src/bin_files/" + filename;
-        
-        PlayCommand playCmd;
-        playCmd.binFilePath = binFilePath;
-        playCmd.timestamp = now;
-        
-        std::cout << "[DAEMON_CMD] Sending play command: " << filename << std::endl;
-        
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            commandQueue.push(playCmd);
-        }
-        queueCv.notify_one();
-        
-        lastCommandTime = now;
-        std::cout << "[SUCCESS] Command sent successfully" << std::endl;
     }
 }
 
