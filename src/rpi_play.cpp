@@ -409,11 +409,16 @@ int main(int argc, char* argv[]) {
     const auto& frames = binDataMap[filename];
     
     const int interval_us = 067'000;
-    struct timespec nextFrameTime, actualTime;
-    clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
+    const int repeat_count = 20;  // Number of times to repeat playback
     
-    int frameIndex = 0;
-    for (const auto& frame : frames) {
+    for (int repeat = 0; repeat < repeat_count; ++repeat) {
+        std::cout << "[REPEAT] Starting playback iteration " << (repeat + 1) << "/" << repeat_count << std::endl;
+        
+        struct timespec nextFrameTime, actualTime;
+        clock_gettime(CLOCK_MONOTONIC, &nextFrameTime);
+        
+        int frameIndex = 0;
+        for (const auto& frame : frames) {
         // Log frame start time and LED sending start
         clock_gettime(CLOCK_MONOTONIC, &actualTime);
         std::cout << "[FRAME_START] Frame " << frameIndex << " start at " 
@@ -491,6 +496,9 @@ int main(int argc, char* argv[]) {
                   << ", accuracy: " << diffNs << "ns, slept: " << sleepTimeNs 
                   << "ns, target: " << targetSleepNs << "ns" << std::endl;
         frameIndex++;
+        }
+        
+        std::cout << "[REPEAT] Completed playback iteration " << (repeat + 1) << "/" << repeat_count << std::endl;
     }
     
     // Turn off all LEDs after playback (only if PCA initialized)
