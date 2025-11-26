@@ -357,13 +357,25 @@ int main(int argc, char* argv[]) {
     const int n_row = total_row / 4;
     const int n_col = total_col / 4;
     // const int raspberry_pi_id = getLastOctetFromIP();
-    const int raspberry_pi_id = 3;
+    int raspberry_pi_id = 3;
+    
+    // IP 주소는 .1부터 시작하므로 1을 빼서 0-based 인덱스로 변환
+    raspberry_pi_id = raspberry_pi_id - 1;
 
     std::cout << "[INFO] Raspberry Pi ID: " << raspberry_pi_id << std::endl;
     
     // Calculate this pi's position in the grid
     const int pi_row = raspberry_pi_id / n_col;
     const int pi_col = raspberry_pi_id % n_col;
+    
+    // 섹션 범위 초과 검증
+    if (pi_row >= n_row || pi_col >= n_col) {
+        std::cerr << "[ERROR] Pi ID " << raspberry_pi_id + 1
+                  << " is out of range for grid " << n_row << "x" << n_col 
+                  << " (position would be " << pi_row << "," << pi_col << ")" << std::endl;
+        std::cerr << "[ERROR] Valid Pi IDs for this grid: 1 to " << (n_row * n_col) << std::endl;
+        return 1;
+    }
     
     // Each raspberry pi handles 4x4 pixels
     const int local_pixel_size = 4;
