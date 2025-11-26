@@ -409,7 +409,7 @@ int main(int argc, char* argv[]) {
     const auto& frames = binDataMap[filename];
     
     const int interval_us = 067'000;
-    const int repeat_count = 20;  // Number of times to repeat playback
+    const int repeat_count = 50;  // Number of times to repeat playback
     
     for (int repeat = 0; repeat < repeat_count; ++repeat) {
         std::cout << "[REPEAT] Starting playback iteration " << (repeat + 1) << "/" << repeat_count << std::endl;

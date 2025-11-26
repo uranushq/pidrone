@@ -249,6 +249,12 @@ void pwmCallback(int gpio, int level, uint32_t tick) {
         // Log all incoming PWM values
         std::cout << "[PWM_IN] Raw PWM: " << pw << "us" << std::endl;
         
+        // 재생 중이면 PWM 신호 무시
+        if (isPlaying.load()) {
+            std::cout << "[PWM_BLOCKED] PWM signal ignored - LED playback in progress" << std::endl;
+            return;
+        }
+        
         // Check if PWM is around 500us (±25us tolerance)
         if (std::abs(static_cast<int32_t>(pw - 500)) <= 25) {
             auto now = std::chrono::steady_clock::now();
