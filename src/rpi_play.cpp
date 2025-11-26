@@ -356,11 +356,7 @@ int main(int argc, char* argv[]) {
     
     const int n_row = total_row / 4;
     const int n_col = total_col / 4;
-    // const int raspberry_pi_id = getLastOctetFromIP();
-    int raspberry_pi_id = 3;
-    
-    // IP 주소는 .1부터 시작하므로 1을 빼서 0-based 인덱스로 변환
-    raspberry_pi_id = raspberry_pi_id - 1;
+    const int raspberry_pi_id = getLastOctetFromIP();
 
     std::cout << "[INFO] Raspberry Pi ID: " << raspberry_pi_id << std::endl;
     
