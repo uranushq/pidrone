@@ -365,6 +365,15 @@ int main(int argc, char* argv[]) {
     const int pi_row = raspberry_pi_id / n_col;
     const int pi_col = raspberry_pi_id % n_col;
     
+    // 섹션 범위 초과 검증
+    if (pi_row >= n_row || pi_col >= n_col) {
+        std::cerr << "[ERROR] Pi ID " << raspberry_pi_id + 1
+                  << " is out of range for grid " << n_row << "x" << n_col 
+                  << " (position would be " << pi_row << "," << pi_col << ")" << std::endl;
+        std::cerr << "[ERROR] Valid Pi IDs for this grid: 1 to " << (n_row * n_col) << std::endl;
+        return 1;
+    }
+    
     // Each raspberry pi handles 4x4 pixels
     const int local_pixel_size = 4;
     int frameSize = total_row * total_col * 3;  // Full frame size
@@ -409,7 +418,7 @@ int main(int argc, char* argv[]) {
     const auto& frames = binDataMap[filename];
     
     const int interval_us = 067'000;
-    const int repeat_count = 20;  // Number of times to repeat playback
+    const int repeat_count = 50;  // Number of times to repeat playback
     
     for (int repeat = 0; repeat < repeat_count; ++repeat) {
         std::cout << "[REPEAT] Starting playback iteration " << (repeat + 1) << "/" << repeat_count << std::endl;
